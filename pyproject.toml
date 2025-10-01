@@ -1,0 +1,16 @@
+[project]
+name = "roi-stream"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "David Turner", email = "dmturner@princeton.edu" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "dearpygui>=2.1.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
