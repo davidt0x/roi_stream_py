@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import List, Optional, Tuple
 import time
 import numpy as np
+import colorsys
 
 
 def _lazy_import_dpg():
@@ -26,6 +27,7 @@ class ViewerApp:
         self.x_axis = None
         self.y_axis = None
         self.series_tags: List[str] = []
+        self.series_themes: List[int] = []
         self.stats_tag = None
 
         # X-axis window management (seconds)
@@ -34,6 +36,7 @@ class ViewerApp:
 
         # cache to avoid recreating series unnecessarily
         self._last_k = None
+        self._colors_rgba: List[Tuple[int, int, int, int]] = []
 
         # Preview components
         self.show_preview = True
@@ -107,12 +110,35 @@ class ViewerApp:
                 except Exception:
                     pass
         self.series_tags = []
+        self.series_themes = []
+        # Build color palette for K series
+        self._colors_rgba = self._build_palette(k)
         for i in range(k):
             tag = f"roi_series_{i}"
             self.series_tags.append(tag)
             dpg.add_line_series([], [], tag=tag, parent=self.y_axis)
+            # Create theme for this series color
+            color = self._colors_rgba[i]
+            with dpg.theme() as th:
+                with dpg.theme_component(dpg.mvLineSeries):
+                    dpg.add_theme_color(dpg.mvPlotCol_Line, color, category=dpg.mvThemeCat_Plots)
+            dpg.bind_item_theme(tag, th)
+            self.series_themes.append(th)
         self._last_k = k
         self._x_limits_set = False
+
+    def _build_palette(self, k: int) -> List[Tuple[int, int, int, int]]:
+        """Generate K distinct RGBA colors (0..255) using evenly spaced HSV hues."""
+        if k <= 0:
+            return []
+        colors: List[Tuple[int, int, int, int]] = []
+        for i in range(k):
+            h = (i / max(1, k)) % 1.0
+            s = 0.85
+            v = 0.95
+            r, g, b = colorsys.hsv_to_rgb(h, s, v)
+            colors.append((int(r * 255), int(g * 255), int(b * 255), 255))
+        return colors
 
     def _ensure_texture(self, W: int, H: int):
         dpg = _lazy_import_dpg()
@@ -172,17 +198,23 @@ class ViewerApp:
 
         # Draw image to fit drawlist width while preserving aspect ratio
         # Compute display size
-        # Use child window size as available drawing area
-        dl_w, dl_h = dpg.get_item_rect_size(self._preview_child_tag)
-        if dl_w <= 0:
-            dl_w = W
-        if dl_h <= 0:
-            dl_h = H
+        # Use child window size as available drawing area, then rely on the
+        # actual drawlist size for transform to keep overlays aligned.
+        child_w, child_h = dpg.get_item_rect_size(self._preview_child_tag)
+        if child_w <= 0:
+            child_w = W
+        if child_h <= 0:
+            child_h = H
         # Keep drawlist sized to the child content region
         try:
-            dpg.configure_item(self._drawlist_tag, width=dl_w, height=dl_h)
+            dpg.configure_item(self._drawlist_tag, width=child_w, height=child_h)
         except Exception:
             pass
+        dl_w, dl_h = dpg.get_item_rect_size(self._drawlist_tag)
+        if dl_w <= 0:
+            dl_w = child_w
+        if dl_h <= 0:
+            dl_h = child_h
         sx = dl_w / float(W)
         sy = dl_h / float(H)
         s = min(sx, sy)
@@ -196,18 +228,18 @@ class ViewerApp:
         if dl_h > disp_h:
             offset_y = (dl_h - disp_h) // 2
 
-        pmin = (offset_x, offset_y)
-        pmax = (offset_x + disp_w, offset_y + disp_h)
+        pmin = (float(offset_x), float(offset_y))
+        pmax = (float(offset_x + disp_w), float(offset_y + disp_h))
         dpg.draw_image(self._tex_tag, pmin, pmax, parent=self._drawlist_tag)
 
         # Draw ROI circles (scaled)
-        color = (255, 0, 0, 255)
         thickness = 2
-        for row in circles:
+        for idx, row in enumerate(circles):
             xc, yc, r = float(row[0]), float(row[1]), float(row[2])
-            cx = offset_x + int(xc * s)
-            cy = offset_y + int(yc * s)
-            rr = max(1, int(r * s))
+            cx = float(offset_x) + float(xc * s)
+            cy = float(offset_y) + float(yc * s)
+            rr = max(1.0, float(r * s))
+            color = self._colors_rgba[idx] if idx < len(self._colors_rgba) else (255, 0, 0, 255)
             dpg.draw_circle((cx, cy), rr, color=color, thickness=thickness, parent=self._drawlist_tag)
 
     def on_frame(self):

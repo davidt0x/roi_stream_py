@@ -30,6 +30,7 @@ dev = [
 roi_stream = "roi_stream.cli:main"
 roi_stream_gui = "roi_stream.roi_stream_gui:main"
 roi_stream_devices = "roi_stream.devices:main"
+roi_stream_make_random_rois = "roi_stream.utilities:main_random_rois"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

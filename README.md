@@ -27,3 +27,9 @@ ROI circles format
 
 - CSV or JSON with rows `[xc, yc, r]` in pixels; origin at top-left.
 - Example: `examples/rois.csv`.
+
+Generate random ROIs
+
+- Create a CSV with 35 random circles for a given resolution (default 1280x720):
+  - `roi_stream_make_random_rois --width 1280 --height 720 --count 35 --out examples/rois_random.csv`
+- A sample file is included: `examples/rois_random.csv`.

@@ -24,6 +24,7 @@ def run_stream(
     backend: Optional[str] = None,
     shared: Optional[SharedState] = None,
     stop_event: Optional[threading.Event] = None,
+    roi_src_resolution: Optional[Tuple[int, int]] = None,
 ) -> Path:
     """Run the streaming loop headlessly and write HDF5.
 
@@ -48,8 +49,29 @@ def run_stream(
     f16_0 = to_uint16_gray(frame0)
     H, W = f16_0.shape
 
+    # If ROI file included a source resolution and it differs, scale coordinates
+    circles_arr = np.asarray(circles, dtype=float)
+    if roi_src_resolution is not None:
+        roiW, roiH = int(roi_src_resolution[0]), int(roi_src_resolution[1])
+        if roiW > 0 and roiH > 0 and (roiW != W or roiH != H):
+            sx = W / float(roiW)
+            sy = H / float(roiH)
+            s_iso = min(sx, sy)
+            circles_scaled = circles_arr.copy()
+            circles_scaled[:, 0] *= sx
+            circles_scaled[:, 1] *= sy
+            circles_scaled[:, 2] *= s_iso
+            # Optional clamp inside bounds
+            circles_scaled[:, 0] = np.clip(circles_scaled[:, 0], 0.0, W - 1.0)
+            circles_scaled[:, 1] = np.clip(circles_scaled[:, 1], 0.0, H - 1.0)
+            max_r = np.minimum.reduce([circles_scaled[:, 0], circles_scaled[:, 1], W - 1 - circles_scaled[:, 0], H - 1 - circles_scaled[:, 1]])
+            circles_scaled[:, 2] = np.maximum(0.0, np.minimum(circles_scaled[:, 2], max_r))
+            circles_arr = circles_scaled
+            if (abs(sx - sy) > 1e-6):
+                print(f"[roi_stream] ROI file resolution {roiW}x{roiH} scaled to {W}x{H} (non-uniform: sx={sx:.3f}, sy={sy:.3f}).")
+        
     # Build ROI masks for this resolution
-    roi = CirclesROI(height=H, width=W, circles=np.asarray(circles, dtype=float))
+    roi = CirclesROI(height=H, width=W, circles=circles_arr)
     if shared is not None:
         shared.circles = roi.circles
         shared.resolution = (W, H)

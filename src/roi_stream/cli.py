@@ -7,7 +7,7 @@ import sys
 import numpy as np
 import threading
 
-from .config import StreamOptions, load_circles, parse_format, parse_source
+from .config import StreamOptions, load_circles_with_meta, parse_format, parse_source
 from .stream import run_stream
 from .shared import SharedState, TraceRing
 
@@ -31,7 +31,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = build_parser().parse_args(argv)
 
     src = parse_source(args.source)
-    circles = load_circles(args.rois)
+    circles, roi_src_res = load_circles_with_meta(args.rois)
 
     opts = StreamOptions(
         frames_per_chunk=args.frames_per_chunk,
@@ -60,7 +60,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
         def _worker():
             try:
-                out = run_stream(src, circles, args.out, opts, fmt, backend=args.backend, shared=shared, stop_event=stop_event)
+                out = run_stream(src, circles, args.out, opts, fmt, backend=args.backend, shared=shared, stop_event=stop_event, roi_src_resolution=roi_src_res)
                 result["out"] = out
             except Exception as e:
                 print(f"[roi_stream] worker error: {e}")
@@ -79,7 +79,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 0
 
     # Headless mode
-    out = run_stream(src, circles, args.out, opts, fmt, backend=args.backend)
+    out = run_stream(src, circles, args.out, opts, fmt, backend=args.backend, roi_src_resolution=roi_src_res)
     print(str(out))
     return 0
 

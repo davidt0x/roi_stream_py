@@ -21,7 +21,49 @@ class StreamOptions:
     max_frames: int = 0  # 0 = unlimited
 
 
-def load_circles(path: PathLike) -> np.ndarray:
+def _parse_resolution_from_header(path: Path) -> Optional[Tuple[int, int]]:
+    """Parse an optional resolution hint from comment/header lines in a CSV.
+
+    Recognizes patterns like:
+      - "# resolution: 1280x720"
+      - "# resolution=1280x720"
+      - "# width=1280 height=720"
+      - "# 1280x720"
+    """
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as f:
+            for _ in range(20):  # scan first few lines
+                pos = f.tell()
+                line = f.readline()
+                if not line:
+                    break
+                s = line.strip()
+                if not s:
+                    continue
+                if not s.startswith("#"):
+                    # stop at first non-comment line
+                    break
+                # search for WxH
+                m = re.search(r"(\d+)\s*[xX,]\s*(\d+)", s)
+                if m:
+                    w = int(m.group(1))
+                    h = int(m.group(2))
+                    if w > 0 and h > 0:
+                        return (w, h)
+                # search for width/height keywords
+                m2 = re.search(r"width\s*[=:]\s*(\d+).*height\s*[=:]\s*(\d+)", s, flags=re.IGNORECASE)
+                if m2:
+                    w = int(m2.group(1))
+                    h = int(m2.group(2))
+                    if w > 0 and h > 0:
+                        return (w, h)
+                # else continue
+    except Exception:
+        return None
+    return None
+
+
+def load_circles_with_meta(path: PathLike) -> tuple[np.ndarray, Optional[Tuple[int, int]]]:
     """Load ROI circles as an array of shape (K, 3) [xc, yc, r] floats.
 
     Supports CSV (with or without header, lines starting with '#' ignored)
@@ -35,8 +77,10 @@ def load_circles(path: PathLike) -> np.ndarray:
     if ext in {".json", ".jsn"}:
         data = json.loads(p.read_text())
         arr = np.asarray(data, dtype=float)
+        src_res: Optional[Tuple[int, int]] = None
     else:
         # CSV or text: read rows of 3 floats, skipping comments/blank lines
+        src_res = _parse_resolution_from_header(p)
         rows = []
         with p.open("r", newline="") as f:
             reader = csv.reader(f)
@@ -62,6 +106,11 @@ def load_circles(path: PathLike) -> np.ndarray:
 
     if arr.ndim != 2 or arr.shape[1] != 3:
         raise ValueError("ROI circles must be an Nx3 array of [xc, yc, r]")
+    return arr, src_res
+
+
+def load_circles(path: PathLike) -> np.ndarray:
+    arr, _ = load_circles_with_meta(path)
     return arr
 
 
@@ -110,4 +159,3 @@ def parse_format(fmt: Optional[str]) -> Tuple[Optional[int], Optional[int], Opti
                 width = height = None
 
     return width, height, fps
-
