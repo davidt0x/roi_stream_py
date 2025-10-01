@@ -43,8 +43,13 @@ class ViewerApp:
         self._drawlist_tag = "roi_preview_drawlist"
         self._last_tex_shape: Optional[Tuple[int, int]] = None  # (W, H)
         self._last_tex_update = 0.0
-        self._preview_hz = 30.0  # limit texture updates
+        self._preview_hz = 60.0  # limit texture updates
         self._raw_rgba: Optional[np.ndarray] = None  # float32 (H, W, 4)
+        # Viewport sync
+        self._vp_w: Optional[int] = None
+        self._vp_h: Optional[int] = None
+        # Preview sizing (fraction of viewport height)
+        self.preview_frac: float = 0.33
 
     def build_ui(self):
         dpg = _lazy_import_dpg()
@@ -52,6 +57,9 @@ class ViewerApp:
             with dpg.collapsing_header(label="Preview", default_open=True):
                 dpg.add_checkbox(label="Show Preview", default_value=self.show_preview,
                                  callback=self._on_toggle_preview)
+                dpg.add_slider_float(label="Preview height (fraction)", default_value=self.preview_frac,
+                                     min_value=0.10, max_value=0.60, format="%.2f",
+                                     callback=self._on_preview_frac_change)
                 # Child window provides a sized area; drawlist fills it
                 with dpg.child_window(tag=self._preview_child_tag, width=-1, height=400, border=True):
                     dpg.add_drawlist(tag=self._drawlist_tag, width=-1, height=-1)
@@ -66,6 +74,8 @@ class ViewerApp:
                 self.y_axis = dpg.add_plot_axis(dpg.mvYAxis, label="Mean")
                 # Create placeholder series; real ones added in refresh
             self.stats_tag = dpg.add_text("K=0  points=0")
+        # Make this the primary window so it follows viewport events
+        dpg.set_primary_window(self.window_tag, True)
 
     def _on_window_change(self, sender, app_data, *_):
         try:
@@ -77,6 +87,13 @@ class ViewerApp:
 
     def _on_toggle_preview(self, sender, app_data, *_):
         self.show_preview = bool(app_data)
+
+    def _on_preview_frac_change(self, sender, app_data, *_):
+        try:
+            v = float(app_data)
+        except Exception:
+            return
+        self.preview_frac = float(min(0.9, max(0.05, v)))
 
     def _ensure_series(self, k: int):
         dpg = _lazy_import_dpg()
@@ -195,6 +212,19 @@ class ViewerApp:
 
     def on_frame(self):
         dpg = _lazy_import_dpg()
+        # Keep the main window and preview child sized to the viewport
+        vp_w = dpg.get_viewport_client_width()
+        vp_h = dpg.get_viewport_client_height()
+        # Always sync sizes to viewport, and set preview child to a fraction of viewport height
+        self._vp_w, self._vp_h = vp_w, vp_h
+        try:
+            dpg.set_item_pos(self.window_tag, (0, 0))
+            dpg.set_item_width(self.window_tag, max(1, vp_w))
+            dpg.set_item_height(self.window_tag, max(1, vp_h))
+            prev_h = max(120, int(vp_h * self.preview_frac))
+            dpg.configure_item(self._preview_child_tag, width=max(1, vp_w), height=prev_h)
+        except Exception:
+            pass
         # Update preview image/overlays
         self._update_preview()
 
@@ -258,6 +288,10 @@ def run_gui(shared_state, stop_event) -> None:
 
     dpg.setup_dearpygui()
     dpg.show_viewport()
+    try:
+        dpg.maximize_viewport()
+    except Exception:
+        pass
 
     while dpg.is_dearpygui_running():
         if stop_event.is_set():
