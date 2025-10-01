@@ -5,9 +5,11 @@ from pathlib import Path
 from typing import Optional
 import sys
 import numpy as np
+import threading
 
 from .config import StreamOptions, load_circles, parse_format, parse_source
 from .stream import run_stream
+from .shared import SharedState, TraceRing
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -40,8 +42,43 @@ def main(argv: Optional[list[str]] = None) -> int:
     fmt = parse_format(args.format)
 
     if args.gui:
-        print("[roi_stream] --gui requested: initial CLI runs headless; GUI wiring will be added in a later step.")
+        # GUI mode: run stream in a background thread and launch the viewer
+        try:
+            from .gui_app import run_gui
+        except Exception as e:
+            print("[roi_stream] GUI requested but Dear PyGui not available. Install extras: pip install '.[gui]'")
+            print(f"[roi_stream] Import error: {e}")
+            return 2
 
+        # Determine ring buffer length
+        # Prefer requested FPS from format, else fall back to 60
+        fps_hint = fmt[2] if fmt and fmt[2] else 60.0
+        ring_len = int(max(300, opts.trace_buffer_sec * max(1.0, float(fps_hint))))
+        shared = SharedState(traces=TraceRing(k=int(circles.shape[0]), maxlen=ring_len))
+        stop_event = threading.Event()
+        result: dict[str, Optional[Path]] = {"out": None}
+
+        def _worker():
+            try:
+                out = run_stream(src, circles, args.out, opts, fmt, backend=args.backend, shared=shared, stop_event=stop_event)
+                result["out"] = out
+            except Exception as e:
+                print(f"[roi_stream] worker error: {e}")
+            finally:
+                stop_event.set()
+
+        th = threading.Thread(target=_worker, name="roi_stream_worker", daemon=True)
+        th.start()
+        # Run GUI loop (blocking)
+        run_gui(shared, stop_event)
+        # Ensure worker stops and finalize
+        stop_event.set()
+        th.join(timeout=5.0)
+        if result["out"] is not None:
+            print(str(result["out"]))
+        return 0
+
+    # Headless mode
     out = run_stream(src, circles, args.out, opts, fmt, backend=args.backend)
     print(str(out))
     return 0

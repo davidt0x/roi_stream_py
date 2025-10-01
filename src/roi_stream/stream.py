@@ -11,6 +11,8 @@ from .capture import FrameSource
 from .config import StreamOptions
 from .roi import CirclesROI, to_uint16_gray
 from .writer import H5TracesWriter
+from .shared import SharedState
+import threading
 
 
 def run_stream(
@@ -20,6 +22,8 @@ def run_stream(
     opts: Optional[StreamOptions] = None,
     format_tuple: Optional[Tuple[Optional[int], Optional[int], Optional[float]]] = None,
     backend: Optional[str] = None,
+    shared: Optional[SharedState] = None,
+    stop_event: Optional[threading.Event] = None,
 ) -> Path:
     """Run the streaming loop headlessly and write HDF5.
 
@@ -46,6 +50,9 @@ def run_stream(
 
     # Build ROI masks for this resolution
     roi = CirclesROI(height=H, width=W, circles=np.asarray(circles, dtype=float))
+    if shared is not None:
+        shared.circles = roi.circles
+        shared.resolution = (W, H)
 
     # HDF5 writer setup
     if out_path is None:
@@ -76,10 +83,15 @@ def run_stream(
     frametimes.append(t)
     pending_t.append(t)
     pending_means.append(means0)
+    if shared is not None:
+        shared.traces.append(t, means0)
+        shared.update_frame(f16_0, (W, H))
 
     # Main loop
     try:
         while True:
+            if stop_event is not None and stop_event.is_set():
+                break
             ok, frame = src.read()
             if not ok or frame is None:
                 break
@@ -94,6 +106,9 @@ def run_stream(
 
             pending_t.append(t)
             pending_means.append(means)
+            if shared is not None:
+                shared.traces.append(t, means)
+                shared.update_frame(f16, (W, H))
 
             # Flush chunk
             if len(pending_t) >= opts.frames_per_chunk:
