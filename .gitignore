@@ -10,3 +10,6 @@ wheels/
 .venv
 
 matlab/
+
+# Ignore data traces
+traces_*.h5

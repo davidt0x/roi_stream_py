@@ -55,7 +55,11 @@ CLI (proposed)
 - Behavior:
   - Ctrl+C stops gracefully, flushes pending rows, finalizes attributes.
   - For webcams, sets best‑effort FPS and exposure via OpenCV properties if supported.
-  - Local testing note: a virtual camera is available on device index `2`; you can run `roi_stream --source 2` to test without physical hardware.
+  - Local testing note: device index can vary by system. Use `roi_stream_devices` to probe indexes and backends; on Windows, DirectShow (`--backend dshow`) or MSMF (`--backend msmf`) may work. Device names like `"video=OBS Virtual Camera"` can be opened with `--backend dshow`.
+  - Under WSL, camera devices are generally unavailable; prefer file sources for tests.
+
+- Utilities:
+  - `roi_stream_devices` — probes device indexes for the selected backend and prints resolution/FPS.
 
 GUI (Dear PyGui)
 
@@ -101,6 +105,7 @@ Testing strategy (pytest)
     - `testpaths = ["tests"]`
     - `markers = ["offline: tests using prerecorded video", "virtualcam: tests using local virtual camera at index 2", "gui: interactive viewer tests (skipped in CI)"]`
   - Default run: `pytest -q` (no hardware required). Skip `gui` by default.
+  - WSL guidance: in WSL, run only offline tests by default; skip `virtualcam`.
 - CI guidance:
   - Run unit tests and offline integration on a worker without camera access.
   - Cache test artifacts only in the temp directory; do not write outside `tmp_path`.
@@ -116,35 +121,38 @@ Packaging and dependencies
     - `[project.scripts]`
       - `roi_stream = "roi_stream.cli:main"`
       - `roi_stream_gui = "roi_stream.gui_app:main"`
+      - `roi_stream_devices = "roi_stream.devices:main"`
 - Keep `py.typed` for typing consumers.
 
 Milestones and deliverables
 
-1) Skeleton + CLI stub (day 1)
-   - Create modules (`capture`, `roi`, `writer`, `stream`, `cli`).
-   - Implement config parsing, ROI CSV/JSON loader, and HDF5 writer.
-   - CLI runs on a video file, computes means (no GUI), writes HDF5.
-   - Deliverable: `roi_stream run --source matlab/test_circle_...mp4 --rois rois.csv --out traces.h5` works; Ctrl+C finalizes. Locally, also sanity‑check with the virtual camera: `roi_stream run --source 2 --rois rois.csv --max-frames 200 --out traces.h5`.
+1) Skeleton + CLI stub (completed)
+   - Modules scaffolded: `capture`, `roi`, `writer`, `stream`, `cli`.
+   - Config parsing, ROI loader, HDF5 writer implemented; file streaming validated.
+   - Windows device capture validated (index varies; `--backend dshow/msmf`).
+   - Utility `roi_stream_devices` added for probing indexes.
+   - Fix applied: HDF5 `/time` assignment keeps 2D shape to avoid broadcasting errors.
 
-2) Live preview + traces (day 2–3)
+2) Live preview + traces (next)
    - Shared ring buffer for timeseries and latest frame.
    - Dear PyGui app adapted from stub; plot K series and image overlay.
    - `--gui` flag to launch viewer alongside streaming.
    - Deliverable: smooth scrolling plot and periodic image refresh; CPU usage reasonable.
 
-3) Camera device support (day 3–4)
-   - Webcam index as `--source` (int); best‑effort FPS/exposure control.
+3) Camera device support (ongoing)
+   - Backend hints (`--backend dshow/msmf/v4l2`) and device name support (`"video=..."`).
    - Resolution negotiation from `--format` string (`WxH@FPS`) or probing.
-   - Deliverable: end‑to‑end on a typical USB camera at 30–60 FPS.
+   - Deliverable: end‑to‑end on a typical USB camera at 30–60 FPS across Windows and Linux (non‑WSL).
 
 4) Robustness + metadata parity (day 4–5)
    - Root attributes parity with MATLAB writer; consistent timestamping.
    - Error handling, logging, graceful shutdown; finalize HDF5 summary.
    - Deliverable: HDF5s readable by existing MATLAB `h5_traces_viewer.m` for `/time`, `/roi/means`, `/roi/circles`.
 
-5) Tests + docs (day 5)
-   - Add unit + offline integration tests.
-   - Update `README.md` with quickstart, CLI examples, GUI notes, and troubleshooting.
+5) Tests + docs
+   - Add unit + offline integration tests (default in CI/WSL).
+   - Optional `virtualcam` tests for local Windows.
+   - Update `README.md` with Windows backend tips, WSL guidance, device probing usage, quickstart, and troubleshooting.
 
 Mapping from MATLAB
 
@@ -162,7 +170,7 @@ Assumptions and risks
 
 Immediate next actions
 
-- Add `numpy`, `opencv-python`, `h5py` to dependencies; make `dearpygui` optional.
-- Scaffold `cli.py`, `stream.py`, `roi.py`, `writer.py`, and wire up a minimal `roi_stream run` path for video files.
-- Provide a small `examples/rois.csv` and usage in `README.md`.
- - Verify local environment can open the virtual camera at index `2` and document this quick test in README: `roi_stream --source 2 --rois examples/rois.csv --max-frames 200`.
+- Wire GUI to streaming ring buffers; add ROI overlays and series plotting.
+- Add pytest tests under `tests/` (roi masks, writer append/finalize, conversion parity, offline integration).
+- Add README sections: device probing (`roi_stream_devices`), Windows backends and device names, WSL file‑based testing.
+- Verify local environment captures from Windows device index (or name) and document with examples.

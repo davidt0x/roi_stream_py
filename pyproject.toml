@@ -8,9 +8,33 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
-    "dearpygui>=2.1.0",
+    "numpy>=1.26",
+    "opencv-python>=4.8.0",
+    "h5py>=3.9.0",
 ]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[project.optional-dependencies]
+gui = [
+    "dearpygui>=2.1.0",
+]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+]
+
+[project.scripts]
+roi_stream = "roi_stream.cli:main"
+roi_stream_gui = "roi_stream.roi_stream_gui:main"
+roi_stream_devices = "roi_stream.devices:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "offline: tests using prerecorded video",
+  "virtualcam: tests using local virtual camera at index 2",
+  "gui: interactive viewer tests (skipped in CI)",
+]
