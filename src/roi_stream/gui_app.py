@@ -40,9 +40,9 @@ class ViewerApp:
         self._colors_rgba: List[Tuple[int, int, int, int]] = []
 
         # Preview components
-        self.show_preview = True
         self._tex_registry_tag = "roi_tex_registry"
         self._tex_tag = None
+        self._preview_header_tag = "roi_preview_header"
         self._preview_child_tag = "roi_preview_child"
         self._drawlist_tag = "roi_preview_drawlist"
         self._last_tex_shape: Optional[Tuple[int, int]] = None  # (W, H)
@@ -54,8 +54,8 @@ class ViewerApp:
         self._vp_h: Optional[int] = None
         # Preview sizing (fraction of viewport height)
         self.preview_frac: float = 0.33
-        # Plot display mode and containers
-        self.display_mode: str = "Overlay"  # or "Stacked"
+        # Plot display mode and containers (default to Stacked)
+        self.display_mode: str = "Stacked"  # or "Overlay"
         self._plots_container_tag = "roi_plots_container"
         self._plots_dirty = True
         # Stacked mode bookkeeping
@@ -63,6 +63,7 @@ class ViewerApp:
         self._stacked_series_tags: List[str] = []
         self._stacked_x_axes: List[int] = []
         self._stacked_y_axes: List[int] = []
+        self._stacked_label_tags: List[str] = []
         self._stacked_plot_height: int = 140
         # Plot performance controls
         self.points_cap: int = 2000  # cap points per series for rendering
@@ -76,26 +77,32 @@ class ViewerApp:
     def build_ui(self):
         dpg = _lazy_import_dpg()
         with dpg.window(tag=self.window_tag, label=self.window_title, width=1000, height=650):
-            with dpg.collapsing_header(label="Preview", default_open=True):
-                dpg.add_checkbox(label="Show Preview", default_value=self.show_preview,
-                                 callback=self._on_toggle_preview)
-                dpg.add_slider_float(label="Preview height (fraction)", default_value=self.preview_frac,
-                                     min_value=0.10, max_value=0.60, format="%.2f",
-                                     callback=self._on_preview_frac_change)
+            with dpg.collapsing_header(tag=self._preview_header_tag, label="Preview", default_open=True):
+                with dpg.group(horizontal=True):
+                    dpg.add_text("Preview height (fraction)")
+                    dpg.add_slider_float(label="", default_value=self.preview_frac,
+                                         min_value=0.10, max_value=0.60, format="%.2f",
+                                         callback=self._on_preview_frac_change, width=200)
                 # Child window provides a sized area; drawlist fills it
                 with dpg.child_window(tag=self._preview_child_tag, width=-1, height=400, border=True):
                     dpg.add_drawlist(tag=self._drawlist_tag, width=-1, height=-1)
 
             with dpg.group(horizontal=True):
-                dpg.add_input_float(label="X window (s)", default_value=self.window_sec, min_value=5.0,
-                                    min_clamped=True, step=5.0, width=140, callback=self._on_window_change)
-                dpg.add_button(label="Quit", callback=lambda *_: dpg.stop_dearpygui())
-                dpg.add_radio_button(items=["Overlay", "Stacked"], default_value=self.display_mode,
-                                     horizontal=True, callback=self._on_display_mode_change)
-                dpg.add_input_int(label="Max points", default_value=self.points_cap, min_value=200,
-                                   min_clamped=True, step=500, width=120, callback=self._on_points_cap_change)
-                dpg.add_checkbox(label="Lock global Y", default_value=self.lock_global_y,
-                                 callback=self._on_lock_y_toggle)
+                with dpg.group(horizontal=True):
+                    dpg.add_text("X window (s)")
+                    dpg.add_input_float(label="", default_value=self.window_sec, min_value=5.0,
+                                        min_clamped=True, step=5.0, width=140, callback=self._on_window_change)
+                with dpg.group(horizontal=True):
+                    dpg.add_text("Single Plot")
+                    dpg.add_checkbox(label="", default_value=False, callback=self._on_single_plot_toggle)
+                with dpg.group(horizontal=True):
+                    dpg.add_text("Max points")
+                    dpg.add_input_int(label="", default_value=self.points_cap, min_value=200,
+                                       min_clamped=True, step=500, width=120, callback=self._on_points_cap_change)
+                with dpg.group(horizontal=True):
+                    dpg.add_text("Lock global Y")
+                    dpg.add_checkbox(label="", default_value=self.lock_global_y,
+                                     callback=self._on_lock_y_toggle)
                 # X-axis uses a fixed-length sliding window; no separate mode toggle
 
             self.stats_tag = dpg.add_text("K=0  points=0")
@@ -112,9 +119,6 @@ class ViewerApp:
             return
         self.window_sec = max(5.0, val)
         self._x_limits_set = False
-
-    def _on_toggle_preview(self, sender, app_data, *_):
-        self.show_preview = bool(app_data)
 
     def _on_preview_frac_change(self, sender, app_data, *_):
         try:
@@ -195,6 +199,7 @@ class ViewerApp:
         self._stacked_series_tags = []
         self._stacked_x_axes = []
         self._stacked_y_axes = []
+        self._stacked_label_tags = []
         self._last_k = None
         self._x_limits_set = False
 
@@ -210,23 +215,29 @@ class ViewerApp:
         dpg = _lazy_import_dpg()
         self._colors_rgba = self._build_palette(k)
         for i in range(k):
-            plot_tag = f"roi_plot_{i}"
-            with dpg.plot(label=f"ROI {i}", width=-1, height=self._stacked_plot_height, tag=plot_tag,
-                          parent=self._plots_container_tag):
-                xax = dpg.add_plot_axis(dpg.mvXAxis, label="Time (s)")
-                yax = dpg.add_plot_axis(dpg.mvYAxis, label="Mean")
-                series_tag = f"roi_series_stacked_{i}"
-                dpg.add_line_series([], [], tag=series_tag, parent=yax)
-                # Color theme
+            # Row container: text label on the left, plot on the right
+            row_tag = f"roi_row_{i}"
+            with dpg.group(horizontal=True, parent=self._plots_container_tag, tag=row_tag):
+                # Add label text outside the plot, before Y-axis
                 color = self._colors_rgba[i]
-                with dpg.theme() as th:
-                    with dpg.theme_component(dpg.mvLineSeries):
-                        dpg.add_theme_color(dpg.mvPlotCol_Line, color, category=dpg.mvThemeCat_Plots)
-                dpg.bind_item_theme(series_tag, th)
+                label_tag = f"roi_label_{i}"
+                dpg.add_text(f"ROI {i}", tag=label_tag, color=color)
+                plot_tag = f"roi_plot_{i}"
+                with dpg.plot(label="", width=-1, height=self._stacked_plot_height, tag=plot_tag):
+                    xax = dpg.add_plot_axis(dpg.mvXAxis, label="Time (s)")
+                    yax = dpg.add_plot_axis(dpg.mvYAxis, label="Mean")
+                    series_tag = f"roi_series_stacked_{i}"
+                    dpg.add_line_series([], [], tag=series_tag, parent=yax)
+                    # Color theme for the series
+                    with dpg.theme() as th:
+                        with dpg.theme_component(dpg.mvLineSeries):
+                            dpg.add_theme_color(dpg.mvPlotCol_Line, color, category=dpg.mvThemeCat_Plots)
+                    dpg.bind_item_theme(series_tag, th)
             self._stacked_plot_tags.append(plot_tag)
             self._stacked_series_tags.append(series_tag)
             self._stacked_x_axes.append(xax)
             self._stacked_y_axes.append(yax)
+            self._stacked_label_tags.append(label_tag)
         # Track current K to avoid rebuild flicker
         self._last_k = k
 
@@ -241,9 +252,10 @@ class ViewerApp:
                 self._build_stacked_plots(k)
             self._plots_dirty = False
 
-    def _on_display_mode_change(self, sender, app_data, *_):
-        # app_data is the selected label string
-        self.display_mode = str(app_data)
+    def _on_single_plot_toggle(self, sender, app_data, *_):
+        # Checkbox: True => Single Plot (Overlay), False => Stacked
+        single = bool(app_data)
+        self.display_mode = "Overlay" if single else "Stacked"
         self._plots_dirty = True
 
     def _ensure_texture(self, W: int, H: int):
@@ -270,8 +282,14 @@ class ViewerApp:
         self._last_tex_shape = (W, H)
 
     def _update_preview(self):
-        if not self.show_preview:
-            return
+        # Only draw preview when the header is expanded (visible)
+        dpg = _lazy_import_dpg()
+        try:
+            if not bool(dpg.get_item_open(self._preview_header_tag)):
+                return
+        except Exception:
+            # If unable to query, assume visible
+            pass
         frame = self.shared.get_frame()
         circles = self.shared.circles
         if frame is None or circles is None:
@@ -296,7 +314,6 @@ class ViewerApp:
             self._last_tex_update = now
 
         # Clear drawlist and draw image + circles
-        dpg = _lazy_import_dpg()
         try:
             dpg.delete_item(self._drawlist_tag, children_only=True)
         except Exception:
@@ -350,6 +367,7 @@ class ViewerApp:
 
     def on_frame(self):
         dpg = _lazy_import_dpg()
+        
         # Keep the main window and preview child sized to the viewport
         vp_w = dpg.get_viewport_client_width()
         vp_h = dpg.get_viewport_client_height()
@@ -359,11 +377,18 @@ class ViewerApp:
             dpg.set_item_pos(self.window_tag, (0, 0))
             dpg.set_item_width(self.window_tag, max(1, vp_w))
             dpg.set_item_height(self.window_tag, max(1, vp_h))
-            prev_h = max(120, int(vp_h * self.preview_frac))
-            dpg.configure_item(self._preview_child_tag, width=max(1, vp_w), height=prev_h)
-            # Allocate remaining height to plots container (with some padding for controls)
-            plots_h = max(200, vp_h - prev_h - 160)
-            dpg.configure_item(self._plots_container_tag, width=max(1, vp_w), height=plots_h)
+            # Compute preview height only if header is expanded
+            prev_h = 0
+            header_open = True
+            try:
+                header_open = bool(dpg.get_item_open(self._preview_header_tag))
+            except Exception:
+                pass
+            if header_open:
+                prev_h = max(120, int(vp_h * self.preview_frac))
+            # Size and show/hide preview child accordingly
+            dpg.configure_item(self._preview_child_tag, width=max(1, vp_w), height=max(0, prev_h), show=header_open)
+            # Do not override plot container height; let it auto-fill remaining space.
         except Exception:
             pass
         # Update preview image/overlays
@@ -501,6 +526,7 @@ class ViewerApp:
                     if self.lock_global_y and self._locked_y_range is not None:
                         ly0, ly1 = self._locked_y_range
                         dpg.set_axis_limits(yax, float(ly0), float(ly1))
+                        y0, y1 = float(ly0), float(ly1)
                     else:
                         ymin = min(yi)
                         ymax = max(yi)
@@ -513,6 +539,7 @@ class ViewerApp:
                             y0 = ymin - pad
                             y1 = ymax + pad
                         dpg.set_axis_limits(yax, float(y0), float(y1))
+                    # No per-frame label updates needed (static text outside plots)
 
         dpg.set_value(self.stats_tag, f"K={k}  points={len(t)}  t={tmax:0.2f}s")
         self._last_plot_update = now
@@ -532,6 +559,11 @@ def run_gui(shared_state, stop_event) -> None:
 
     dpg.setup_dearpygui()
     dpg.show_viewport()
+    # Ensure closing the viewport cleanly signals the worker to stop (HDF5 finalize)
+    try:
+        dpg.set_exit_callback(lambda: stop_event.set())
+    except Exception:
+        pass
     try:
         dpg.maximize_viewport()
     except Exception:
