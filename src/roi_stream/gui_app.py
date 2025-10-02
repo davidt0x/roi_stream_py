@@ -369,20 +369,22 @@ class ViewerApp:
         # Update preview image/overlays
         self._update_preview()
 
-        t, ys = self.shared.traces.snapshot()
+        # Prepare traces for plotting using a windowed snapshot to avoid copying entire history
+        tlast = self.shared.traces.last_time()
+        if tlast <= 0.0:
+            return
+        # Fixed-length sliding window: always keep an axis width of window_sec
+        x0 = max(0.0, tlast - self.window_sec)
+        x1 = x0 + max(self.window_sec, 1e-3)
+        t, ys = self.shared.traces.snapshot_window(start_time=x0, max_points=self.points_cap)
         k = len(ys)
         if k == 0:
             return
         # Ensure plots for current mode and K
         self._ensure_plots(k)
-
-        # Determine visible window in X
         if not t:
             return
         tmax = float(t[-1])
-        # Fixed-length sliding window: always keep an axis width of window_sec
-        x0 = max(0.0, tmax - self.window_sec)
-        x1 = x0 + max(self.window_sec, 1e-3)
 
         now = time.time()
         do_update = (now - self._last_plot_update) >= (1.0 / max(1e-6, self.plot_update_hz))
@@ -390,27 +392,19 @@ class ViewerApp:
             dpg.set_value(self.stats_tag, f"K={k}  points={len(t)}  t={tmax:0.2f}s")
             return
 
-        # Determine indices for visible window and decimation cap
-        # Find first index where t >= x0
-        start_idx = bisect.bisect_left(t, x0)
-        t_view = t[start_idx:]
-        if self.points_cap and len(t_view) > self.points_cap:
-            t_view = t_view[-self.points_cap:]
-            start_idx = len(t) - len(t_view)
-
         if self.display_mode == "Overlay":
             # Update series in overlay plot
             y_min = None
             y_max = None
             for i, tag in enumerate(self.series_tags):
-                yi = ys[i][start_idx:]
-                if len(yi) != len(t_view):
-                    # Align lengths defensively
-                    n = min(len(yi), len(t_view))
+                yi = ys[i]
+                # Align lengths defensively
+                if len(yi) != len(t):
+                    n = min(len(yi), len(t))
                     yi = yi[-n:]
-                    tv = t_view[-n:]
+                    tv = t[-n:]
                 else:
-                    tv = t_view
+                    tv = t
                 dpg.set_value(tag, [tv, yi])
                 if yi:
                     ymin = min(yi)
@@ -464,9 +458,9 @@ class ViewerApp:
             g_max = None
             if self.lock_global_y:
                 for i in range(vis_start, min(vis_end, len(self._stacked_series_tags))):
-                    yi = ys[i][start_idx:]
-                    if len(yi) != len(t_view):
-                        n = min(len(yi), len(t_view))
+                    yi = ys[i]
+                    if len(yi) != len(t):
+                        n = min(len(yi), len(t))
                         yi = yi[-n:]
                     if yi:
                         ymin = min(yi)
@@ -493,13 +487,13 @@ class ViewerApp:
                 series_tag = self._stacked_series_tags[i]
                 xax = self._stacked_x_axes[i]
                 yax = self._stacked_y_axes[i]
-                yi = ys[i][start_idx:]
-                if len(yi) != len(t_view):
-                    n = min(len(yi), len(t_view))
+                yi = ys[i]
+                if len(yi) != len(t):
+                    n = min(len(yi), len(t))
                     yi = yi[-n:]
-                    tv = t_view[-n:]
+                    tv = t[-n:]
                 else:
-                    tv = t_view
+                    tv = t
                 dpg.set_value(series_tag, [tv, yi])
                 # Axis limits
                 dpg.set_axis_limits(xax, x0, x1)

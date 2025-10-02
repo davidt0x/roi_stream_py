@@ -47,6 +47,44 @@ class TraceRing:
             y = [list(series) for series in self._y]
         return t, y
 
+    def last_time(self) -> float:
+        with self._lock:
+            if not self._t:
+                return 0.0
+            return float(self._t[-1])
+
+    def snapshot_window(self, start_time: float, max_points: int | None = None) -> tuple[list[float], list[list[float]]]:
+        """Return only the samples with t >= start_time, capped at max_points from the end.
+
+        This avoids copying the entire ring when only a sliding window is needed.
+        """
+        with self._lock:
+            if not self._t:
+                return [], [[] for _ in range(self._k)]
+            # Iterate from the end to collect recent points until hitting start_time or cap
+            it_t = reversed(self._t)
+            it_ys = [reversed(dq) for dq in self._y]
+            t_rev: list[float] = []
+            y_rev: list[list[float]] = [[] for _ in range(self._k)]
+            cap = max_points if (max_points is not None and max_points > 0) else None
+            count = 0
+            for vals in zip(it_t, *it_ys):
+                tval = float(vals[0])
+                if cap is not None and count >= cap:
+                    break
+                if tval < start_time:
+                    # We've reached outside the window; stop
+                    break
+                t_rev.append(tval)
+                for i in range(self._k):
+                    y_rev[i].append(float(vals[i + 1]))
+                count += 1
+            # Reverse to ascending time order
+            t_rev.reverse()
+            for i in range(self._k):
+                y_rev[i].reverse()
+            return t_rev, y_rev
+
 
 @dataclass
 class SharedState:
@@ -72,4 +110,3 @@ class SharedState:
             if self._frame16 is None:
                 return None
             return self._frame16.copy()
-
