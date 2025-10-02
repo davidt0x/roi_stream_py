@@ -4,6 +4,7 @@ from typing import List, Optional, Tuple
 import time
 import numpy as np
 import colorsys
+import bisect
 
 
 def _lazy_import_dpg():
@@ -46,13 +47,31 @@ class ViewerApp:
         self._drawlist_tag = "roi_preview_drawlist"
         self._last_tex_shape: Optional[Tuple[int, int]] = None  # (W, H)
         self._last_tex_update = 0.0
-        self._preview_hz = 60.0  # limit texture updates
+        self._preview_hz = 20.0  # limit texture updates
         self._raw_rgba: Optional[np.ndarray] = None  # float32 (H, W, 4)
         # Viewport sync
         self._vp_w: Optional[int] = None
         self._vp_h: Optional[int] = None
         # Preview sizing (fraction of viewport height)
         self.preview_frac: float = 0.33
+        # Plot display mode and containers
+        self.display_mode: str = "Overlay"  # or "Stacked"
+        self._plots_container_tag = "roi_plots_container"
+        self._plots_dirty = True
+        # Stacked mode bookkeeping
+        self._stacked_plot_tags: List[str] = []
+        self._stacked_series_tags: List[str] = []
+        self._stacked_x_axes: List[int] = []
+        self._stacked_y_axes: List[int] = []
+        self._stacked_plot_height: int = 140
+        # Plot performance controls
+        self.points_cap: int = 2000  # cap points per series for rendering
+        self.plot_update_hz: float = 30.0
+        self._last_plot_update: float = 0.0
+        # Global Y lock
+        self.lock_global_y: bool = False
+        self._locked_y_range: Optional[Tuple[float, float]] = None
+        # X-axis uses a fixed-length sliding window of size window_sec
 
     def build_ui(self):
         dpg = _lazy_import_dpg()
@@ -71,12 +90,18 @@ class ViewerApp:
                 dpg.add_input_float(label="X window (s)", default_value=self.window_sec, min_value=5.0,
                                     min_clamped=True, step=5.0, width=140, callback=self._on_window_change)
                 dpg.add_button(label="Quit", callback=lambda *_: dpg.stop_dearpygui())
+                dpg.add_radio_button(items=["Overlay", "Stacked"], default_value=self.display_mode,
+                                     horizontal=True, callback=self._on_display_mode_change)
+                dpg.add_input_int(label="Max points", default_value=self.points_cap, min_value=200,
+                                   min_clamped=True, step=500, width=120, callback=self._on_points_cap_change)
+                dpg.add_checkbox(label="Lock global Y", default_value=self.lock_global_y,
+                                 callback=self._on_lock_y_toggle)
+                # X-axis uses a fixed-length sliding window; no separate mode toggle
 
-            with dpg.plot(label="ROI Means", width=-1, height=-1, tag=self.plot_tag):
-                self.x_axis = dpg.add_plot_axis(dpg.mvXAxis, label="Time (s)")
-                self.y_axis = dpg.add_plot_axis(dpg.mvYAxis, label="Mean")
-                # Create placeholder series; real ones added in refresh
             self.stats_tag = dpg.add_text("K=0  points=0")
+            # Container for plots (overlay or stacked)
+            with dpg.child_window(tag=self._plots_container_tag, width=-1, height=-1, border=False):
+                pass
         # Make this the primary window so it follows viewport events
         dpg.set_primary_window(self.window_tag, True)
 
@@ -97,6 +122,20 @@ class ViewerApp:
         except Exception:
             return
         self.preview_frac = float(min(0.9, max(0.05, v)))
+    
+    def _on_points_cap_change(self, sender, app_data, *_):
+        try:
+            v = int(app_data)
+        except Exception:
+            return
+        self.points_cap = int(max(200, v))
+    
+    def _on_lock_y_toggle(self, sender, app_data, *_):
+        self.lock_global_y = bool(app_data)
+        # Reset cached lock so it captures current range on next frame
+        self._locked_y_range = None
+
+    # No x-mode change; sliding window is always used
 
     def _ensure_series(self, k: int):
         dpg = _lazy_import_dpg()
@@ -139,6 +178,73 @@ class ViewerApp:
             r, g, b = colorsys.hsv_to_rgb(h, s, v)
             colors.append((int(r * 255), int(g * 255), int(b * 255), 255))
         return colors
+
+    def _clear_plots_container(self):
+        dpg = _lazy_import_dpg()
+        try:
+            dpg.delete_item(self._plots_container_tag, children_only=True)
+        except Exception:
+            pass
+        # Reset overlay bookkeeping
+        self.x_axis = None
+        self.y_axis = None
+        self.series_tags = []
+        self.series_themes = []
+        # Reset stacked bookkeeping
+        self._stacked_plot_tags = []
+        self._stacked_series_tags = []
+        self._stacked_x_axes = []
+        self._stacked_y_axes = []
+        self._last_k = None
+        self._x_limits_set = False
+
+    def _build_overlay_plots(self, k: int):
+        dpg = _lazy_import_dpg()
+        with dpg.plot(label="ROI Means", width=-1, height=-1, tag=self.plot_tag, parent=self._plots_container_tag):
+            self.x_axis = dpg.add_plot_axis(dpg.mvXAxis, label="Time (s)")
+            self.y_axis = dpg.add_plot_axis(dpg.mvYAxis, label="Mean")
+        # Create line series for overlay
+        self._ensure_series(k)
+
+    def _build_stacked_plots(self, k: int):
+        dpg = _lazy_import_dpg()
+        self._colors_rgba = self._build_palette(k)
+        for i in range(k):
+            plot_tag = f"roi_plot_{i}"
+            with dpg.plot(label=f"ROI {i}", width=-1, height=self._stacked_plot_height, tag=plot_tag,
+                          parent=self._plots_container_tag):
+                xax = dpg.add_plot_axis(dpg.mvXAxis, label="Time (s)")
+                yax = dpg.add_plot_axis(dpg.mvYAxis, label="Mean")
+                series_tag = f"roi_series_stacked_{i}"
+                dpg.add_line_series([], [], tag=series_tag, parent=yax)
+                # Color theme
+                color = self._colors_rgba[i]
+                with dpg.theme() as th:
+                    with dpg.theme_component(dpg.mvLineSeries):
+                        dpg.add_theme_color(dpg.mvPlotCol_Line, color, category=dpg.mvThemeCat_Plots)
+                dpg.bind_item_theme(series_tag, th)
+            self._stacked_plot_tags.append(plot_tag)
+            self._stacked_series_tags.append(series_tag)
+            self._stacked_x_axes.append(xax)
+            self._stacked_y_axes.append(yax)
+        # Track current K to avoid rebuild flicker
+        self._last_k = k
+
+    def _ensure_plots(self, k: int):
+        dpg = _lazy_import_dpg()
+        # Rebuild if dirty or K changed
+        if self._plots_dirty or self._last_k != k:
+            self._clear_plots_container()
+            if self.display_mode == "Overlay":
+                self._build_overlay_plots(k)
+            else:
+                self._build_stacked_plots(k)
+            self._plots_dirty = False
+
+    def _on_display_mode_change(self, sender, app_data, *_):
+        # app_data is the selected label string
+        self.display_mode = str(app_data)
+        self._plots_dirty = True
 
     def _ensure_texture(self, W: int, H: int):
         dpg = _lazy_import_dpg()
@@ -255,6 +361,9 @@ class ViewerApp:
             dpg.set_item_height(self.window_tag, max(1, vp_h))
             prev_h = max(120, int(vp_h * self.preview_frac))
             dpg.configure_item(self._preview_child_tag, width=max(1, vp_w), height=prev_h)
+            # Allocate remaining height to plots container (with some padding for controls)
+            plots_h = max(200, vp_h - prev_h - 160)
+            dpg.configure_item(self._plots_container_tag, width=max(1, vp_w), height=plots_h)
         except Exception:
             pass
         # Update preview image/overlays
@@ -264,46 +373,155 @@ class ViewerApp:
         k = len(ys)
         if k == 0:
             return
-        self._ensure_series(k)
+        # Ensure plots for current mode and K
+        self._ensure_plots(k)
 
         # Determine visible window in X
         if not t:
             return
         tmax = float(t[-1])
+        # Fixed-length sliding window: always keep an axis width of window_sec
         x0 = max(0.0, tmax - self.window_sec)
-        x1 = max(tmax, x0 + 1e-3)
+        x1 = x0 + max(self.window_sec, 1e-3)
 
-        # Update series
-        # Each series uses the same x vector (t)
-        # To reduce copies, reuse t list; dpg takes Python lists
-        y_min = None
-        y_max = None
-        for i, tag in enumerate(self.series_tags):
-            dpg.set_value(tag, [t, ys[i]])
-            if ys[i]:
-                ymin = min(ys[i][-min(len(ys[i]), len(t)):])
-                ymax = max(ys[i][-min(len(ys[i]), len(t)):])
-                y_min = ymin if y_min is None else min(y_min, ymin)
-                y_max = ymax if y_max is None else max(y_max, ymax)
+        now = time.time()
+        do_update = (now - self._last_plot_update) >= (1.0 / max(1e-6, self.plot_update_hz))
+        if not do_update:
+            dpg.set_value(self.stats_tag, f"K={k}  points={len(t)}  t={tmax:0.2f}s")
+            return
 
-        if not self._x_limits_set:
+        # Determine indices for visible window and decimation cap
+        # Find first index where t >= x0
+        start_idx = bisect.bisect_left(t, x0)
+        t_view = t[start_idx:]
+        if self.points_cap and len(t_view) > self.points_cap:
+            t_view = t_view[-self.points_cap:]
+            start_idx = len(t) - len(t_view)
+
+        if self.display_mode == "Overlay":
+            # Update series in overlay plot
+            y_min = None
+            y_max = None
+            for i, tag in enumerate(self.series_tags):
+                yi = ys[i][start_idx:]
+                if len(yi) != len(t_view):
+                    # Align lengths defensively
+                    n = min(len(yi), len(t_view))
+                    yi = yi[-n:]
+                    tv = t_view[-n:]
+                else:
+                    tv = t_view
+                dpg.set_value(tag, [tv, yi])
+                if yi:
+                    ymin = min(yi)
+                    ymax = max(yi)
+                    y_min = ymin if y_min is None else min(y_min, ymin)
+                    y_max = ymax if y_max is None else max(y_max, ymax)
             dpg.set_axis_limits(self.x_axis, x0, x1)
-            self._x_limits_set = True
+            if y_min is not None and y_max is not None:
+                if self.lock_global_y:
+                    # Use cached lock or capture now
+                    if self._locked_y_range is None:
+                        if y_min == y_max:
+                            pad = 1.0 if y_min == 0 else abs(y_min) * 0.1 + 1.0
+                            y0 = y_min - pad
+                            y1 = y_max + pad
+                        else:
+                            pad = (y_max - y_min) * 0.10
+                            y0 = y_min - pad
+                            y1 = y_max + pad
+                        self._locked_y_range = (float(y0), float(y1))
+                    y0, y1 = self._locked_y_range
+                    dpg.set_axis_limits(self.y_axis, float(y0), float(y1))
+                else:
+                    if y_min == y_max:
+                        pad = 1.0 if y_min == 0 else abs(y_min) * 0.1 + 1.0
+                        y0 = y_min - pad
+                        y1 = y_max + pad
+                    else:
+                        pad = (y_max - y_min) * 0.10
+                        y0 = y_min - pad
+                        y1 = y_max + pad
+                    dpg.set_axis_limits(self.y_axis, float(y0), float(y1))
         else:
-            dpg.set_axis_limits(self.x_axis, x0, x1)
-
-        if y_min is not None and y_max is not None:
-            if y_min == y_max:
-                pad = 1.0 if y_min == 0 else abs(y_min) * 0.1 + 1.0
-                y0 = y_min - pad
-                y1 = y_max + pad
+            # Stacked mode: update only visible plots to reduce workload
+            # Determine visible index range based on scroll and container height
+            cont_w, cont_h = dpg.get_item_rect_size(self._plots_container_tag)
+            try:
+                yscroll = dpg.get_y_scroll(self._plots_container_tag)
+            except Exception:
+                yscroll = 0.0
+            if self._stacked_plot_height <= 0:
+                vis_start = 0
+                vis_end = k
             else:
-                pad = (y_max - y_min) * 0.10
-                y0 = y_min - pad
-                y1 = y_max + pad
-            dpg.set_axis_limits(self.y_axis, float(y0), float(y1))
+                vis_start = max(0, int(yscroll // self._stacked_plot_height))
+                visible_rows = int(max(1, cont_h // self._stacked_plot_height)) + 2
+                vis_end = min(k, vis_start + visible_rows)
+
+            # If locking globally, compute a combined y range for visible plots
+            g_min = None
+            g_max = None
+            if self.lock_global_y:
+                for i in range(vis_start, min(vis_end, len(self._stacked_series_tags))):
+                    yi = ys[i][start_idx:]
+                    if len(yi) != len(t_view):
+                        n = min(len(yi), len(t_view))
+                        yi = yi[-n:]
+                    if yi:
+                        ymin = min(yi)
+                        ymax = max(yi)
+                        g_min = ymin if g_min is None else min(g_min, ymin)
+                        g_max = ymax if g_max is None else max(g_max, ymax)
+                if g_min is not None and g_max is not None:
+                    if self._locked_y_range is None:
+                        if g_min == g_max:
+                            pad = 1.0 if g_min == 0 else abs(g_min) * 0.1 + 1.0
+                            y0 = g_min - pad
+                            y1 = g_max + pad
+                        else:
+                            pad = (g_max - g_min) * 0.10
+                            y0 = g_min - pad
+                            y1 = g_max + pad
+                        self._locked_y_range = (float(y0), float(y1))
+                    y0, y1 = self._locked_y_range
+
+            for i in range(0, min(k, len(self._stacked_series_tags))):
+                if i < vis_start or i >= vis_end:
+                    # Skip updates for non-visible plots
+                    continue
+                series_tag = self._stacked_series_tags[i]
+                xax = self._stacked_x_axes[i]
+                yax = self._stacked_y_axes[i]
+                yi = ys[i][start_idx:]
+                if len(yi) != len(t_view):
+                    n = min(len(yi), len(t_view))
+                    yi = yi[-n:]
+                    tv = t_view[-n:]
+                else:
+                    tv = t_view
+                dpg.set_value(series_tag, [tv, yi])
+                # Axis limits
+                dpg.set_axis_limits(xax, x0, x1)
+                if yi:
+                    if self.lock_global_y and self._locked_y_range is not None:
+                        ly0, ly1 = self._locked_y_range
+                        dpg.set_axis_limits(yax, float(ly0), float(ly1))
+                    else:
+                        ymin = min(yi)
+                        ymax = max(yi)
+                        if ymin == ymax:
+                            pad = 1.0 if ymin == 0 else abs(ymin) * 0.1 + 1.0
+                            y0 = ymin - pad
+                            y1 = ymax + pad
+                        else:
+                            pad = (ymax - ymin) * 0.10
+                            y0 = ymin - pad
+                            y1 = ymax + pad
+                        dpg.set_axis_limits(yax, float(y0), float(y1))
 
         dpg.set_value(self.stats_tag, f"K={k}  points={len(t)}  t={tmax:0.2f}s")
+        self._last_plot_update = now
 
 
 def run_gui(shared_state, stop_event) -> None:
