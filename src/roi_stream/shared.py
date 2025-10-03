@@ -19,6 +19,8 @@ class TraceRing:
         self._maxlen = int(max(1, maxlen))
         self._t: deque[float] = deque(maxlen=self._maxlen)
         self._y: List[deque[float]] = [deque(maxlen=self._maxlen) for _ in range(self._k)]
+        # Monotonic count of total samples appended since start
+        self._total_count: int = 0
 
     @property
     def k(self) -> int:
@@ -39,6 +41,7 @@ class TraceRing:
             self._t.append(float(t))
             for i in range(self._k):
                 self._y[i].append(float(y[i]))
+            self._total_count += 1
 
     def snapshot(self) -> tuple[list[float], list[list[float]]]:
         """Return shallow copies of t and y-series for UI thread."""
@@ -52,6 +55,11 @@ class TraceRing:
             if not self._t:
                 return 0.0
             return float(self._t[-1])
+
+    def total_count(self) -> int:
+        """Return the total number of samples ever appended (monotonic)."""
+        with self._lock:
+            return int(self._total_count)
 
     def snapshot_window(self, start_time: float, max_points: int | None = None) -> tuple[list[float], list[list[float]]]:
         """Return only the samples with t >= start_time, capped at max_points from the end.

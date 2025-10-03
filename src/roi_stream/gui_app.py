@@ -99,7 +99,7 @@ class ViewerApp:
                                      callback=self._on_lock_y_toggle)
                 # X-axis uses a fixed-length sliding window; no separate mode toggle
 
-            self.stats_tag = dpg.add_text("K=0  points=0")
+            self.stats_tag = dpg.add_text("ROIs=0  samples=0")
             # Container for plots (overlay or stacked)
             with dpg.child_window(tag=self._plots_container_tag, width=-1, height=-1, border=False):
                 pass
@@ -276,28 +276,34 @@ class ViewerApp:
         except Exception:
             # If unable to query, assume visible
             pass
-        frame = self.shared.get_frame()
+
+        # Avoid copying the full frame unless we're about to update the texture.
         circles = self.shared.circles
-        if frame is None or circles is None:
+        res = self.shared.resolution
+        if circles is None or res is None:
             return
-        H, W = frame.shape
+        W, H = int(res[0]), int(res[1])
+        if W <= 0 or H <= 0:
+            return
+        # Ensure texture exists to render the last image (even if not updating pixels this frame)
         self._ensure_texture(W, H)
 
         now = time.time()
         if (now - self._last_tex_update) >= (1.0 / self._preview_hz):
-            # Normalize uint16 to float32 in-place into the raw buffer
-            # Maintain persistent memory; Dear PyGui reads from this buffer each frame
-            if self._raw_rgba is not None:
-                # Ensure shape matches
-                if self._raw_rgba.shape[0] != H or self._raw_rgba.shape[1] != W:
-                    # Recreate texture with new size
-                    self._ensure_texture(W, H)
-                # Write luminance to RGB channels
-                self._raw_rgba[..., 0] = frame.astype(np.float32) / 65535.0
-                self._raw_rgba[..., 1] = self._raw_rgba[..., 0]
-                self._raw_rgba[..., 2] = self._raw_rgba[..., 0]
-                # Alpha remains 1.0
-            self._last_tex_update = now
+            # Pull the latest frame and upload to the texture buffer
+            frame = self.shared.get_frame()
+            if frame is not None:
+                Hf, Wf = frame.shape
+                # If resolution changed, recreate texture and update our local W/H
+                if (Hf != H) or (Wf != W):
+                    W, H = int(Wf), int(Hf)
+                self._ensure_texture(W, H)
+                # Normalize uint16 to float32 into the persistent raw buffer
+                if self._raw_rgba is not None:
+                    self._raw_rgba[..., 0] = frame.astype(np.float32) / 65535.0
+                    self._raw_rgba[..., 1] = self._raw_rgba[..., 0]
+                    self._raw_rgba[..., 2] = self._raw_rgba[..., 0]
+                self._last_tex_update = now
 
         # Clear drawlist and draw image + circles
         try:
@@ -384,24 +390,30 @@ class ViewerApp:
         tlast = self.shared.traces.last_time()
         if tlast <= 0.0:
             return
+        now = time.time()
+        do_update = (now - self._last_plot_update) >= (1.0 / max(1e-6, self.plot_update_hz))
         # Fixed-length sliding window: always keep an axis width of window_sec
         x0 = max(0.0, tlast - self.window_sec)
         x1 = x0 + max(self.window_sec, 1e-3)
+        if not do_update:
+            # Lightweight stats update without building windowed copies
+            k = int(self.shared.traces.k)
+            total_pts = 0
+            try:
+                total_pts = int(self.shared.traces.total_count())
+            except Exception:
+                pass
+            dpg.set_value(self.stats_tag, f"ROIs={k}  samples={total_pts}  t={tlast:0.2f}s")
+            return
+
+        # Build windowed snapshot only when performing a plot update
         t, ys = self.shared.traces.snapshot_window(start_time=x0)
         k = len(ys)
-        if k == 0:
+        if k == 0 or not t:
             return
         # Ensure plots for current mode and K
         self._ensure_plots(k)
-        if not t:
-            return
         tmax = float(t[-1])
-
-        now = time.time()
-        do_update = (now - self._last_plot_update) >= (1.0 / max(1e-6, self.plot_update_hz))
-        if not do_update:
-            dpg.set_value(self.stats_tag, f"K={k}  points={len(t)}  t={tmax:0.2f}s")
-            return
 
         if self.display_mode == "Overlay":
             # Update series in overlay plot
@@ -527,7 +539,12 @@ class ViewerApp:
                         dpg.set_axis_limits(yax, float(y0), float(y1))
                     # No per-frame label updates needed (static text outside plots)
 
-        dpg.set_value(self.stats_tag, f"K={k}  points={len(t)}  t={tmax:0.2f}s")
+        total_pts = 0
+        try:
+            total_pts = int(self.shared.traces.total_count())
+        except Exception:
+            total_pts = len(t)
+        dpg.set_value(self.stats_tag, f"ROIs={k}  samples={total_pts}  t={tmax:0.2f}s")
         self._last_plot_update = now
 
 
