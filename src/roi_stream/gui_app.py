@@ -4,7 +4,6 @@ from typing import List, Optional, Tuple
 import time
 import numpy as np
 import colorsys
-import bisect
 
 
 def _lazy_import_dpg():
@@ -66,7 +65,6 @@ class ViewerApp:
         self._stacked_label_tags: List[str] = []
         self._stacked_plot_height: int = 140
         # Plot performance controls
-        self.points_cap: int = 2000  # cap points per series for rendering
         self.plot_update_hz: float = 30.0
         self._last_plot_update: float = 0.0
         # Global Y lock
@@ -96,10 +94,6 @@ class ViewerApp:
                     dpg.add_text("Single Plot")
                     dpg.add_checkbox(label="", default_value=False, callback=self._on_single_plot_toggle)
                 with dpg.group(horizontal=True):
-                    dpg.add_text("Max points")
-                    dpg.add_input_int(label="", default_value=self.points_cap, min_value=200,
-                                       min_clamped=True, step=500, width=120, callback=self._on_points_cap_change)
-                with dpg.group(horizontal=True):
                     dpg.add_text("Lock global Y")
                     dpg.add_checkbox(label="", default_value=self.lock_global_y,
                                      callback=self._on_lock_y_toggle)
@@ -126,14 +120,6 @@ class ViewerApp:
         except Exception:
             return
         self.preview_frac = float(min(0.9, max(0.05, v)))
-    
-    def _on_points_cap_change(self, sender, app_data, *_):
-        try:
-            v = int(app_data)
-        except Exception:
-            return
-        self.points_cap = int(max(200, v))
-    
     def _on_lock_y_toggle(self, sender, app_data, *_):
         self.lock_global_y = bool(app_data)
         # Reset cached lock so it captures current range on next frame
@@ -401,7 +387,7 @@ class ViewerApp:
         # Fixed-length sliding window: always keep an axis width of window_sec
         x0 = max(0.0, tlast - self.window_sec)
         x1 = x0 + max(self.window_sec, 1e-3)
-        t, ys = self.shared.traces.snapshot_window(start_time=x0, max_points=self.points_cap)
+        t, ys = self.shared.traces.snapshot_window(start_time=x0)
         k = len(ys)
         if k == 0:
             return
