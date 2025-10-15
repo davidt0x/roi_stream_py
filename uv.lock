@@ -244,6 +244,7 @@ name = "roi-stream"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "dearpygui" },
     { name = "h5py" },
     { name = "numpy" },
     { name = "opencv-python" },
@@ -254,17 +255,14 @@ dev = [
     { name = "pytest" },
     { name = "pytest-cov" },
 ]
-gui = [
-    { name = "dearpygui" },
-]
 
 [package.metadata]
 requires-dist = [
-    { name = "dearpygui", marker = "extra == 'gui'", specifier = ">=2.1.0" },
+    { name = "dearpygui", specifier = ">=2.1.0" },
     { name = "h5py", specifier = ">=3.9.0" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "opencv-python", specifier = ">=4.8.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.1" },
 ]
-provides-extras = ["gui", "dev"]
+provides-extras = ["dev"]
