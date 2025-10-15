@@ -218,3 +218,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Dear IMGUI config file
+ROI_Stream_Viewer.ini

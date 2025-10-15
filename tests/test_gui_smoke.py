@@ -1,20 +1,20 @@
 import os
 import sys
 import threading
+import time
+
 import numpy as np
 import pytest
 
-
-# Skip module if Dear PyGui isn't available or no display on Linux
 try:
-    import dearpygui.dearpygui as dpg  # type: ignore
+    from imgui_bundle import imgui  # noqa: F401
 except Exception:  # pragma: no cover
-    pytest.skip("DearPyGui not available", allow_module_level=True)
+    pytest.skip("imgui_bundle not available", allow_module_level=True)
 
 if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
-    pytest.skip("No DISPLAY available for DearPyGui", allow_module_level=True)
+    pytest.skip("No DISPLAY available for imgui_bundle", allow_module_level=True)
 
-
+from roi_stream.gui_app import ViewerApp
 from roi_stream.shared import SharedState, TraceRing
 
 
@@ -25,38 +25,47 @@ def _make_shared_state(k: int = 3, n_samples: int = 200) -> SharedState:
         vals = np.linspace(0.0, 1.0, k) + 0.1 * np.sin(0.2 * i)
         ring.append(t, vals)
     shared = SharedState(traces=ring)
-    W, H = 320, 240
-    shared.circles = np.stack([
-        [W * 0.25, H * 0.3, min(W, H) * 0.08],
-        [W * 0.50, H * 0.5, min(W, H) * 0.10],
-        [W * 0.75, H * 0.7, min(W, H) * 0.06],
-    ], axis=0)
-    shared.resolution = (W, H)
-    frame = (np.linspace(0, 65535, W, dtype=np.uint16)[None, :]).repeat(H, axis=0)
-    shared.update_frame(frame, (W, H))
+    w, h = 320, 240
+    shared.circles = np.stack(
+        [
+            [w * 0.25, h * 0.3, min(w, h) * 0.08],
+            [w * 0.50, h * 0.5, min(w, h) * 0.10],
+            [w * 0.75, h * 0.7, min(w, h) * 0.06],
+        ],
+        axis=0,
+    )
+    shared.resolution = (w, h)
+    frame = (np.linspace(0, 65535, w, dtype=np.uint16)[None, :]).repeat(h, axis=0)
+    shared.update_frame(frame, (w, h))
     return shared
 
 
 @pytest.mark.gui
-def test_gui_smoke_stacked_and_overlay(gui_test_context):
+def test_gui_smoke_state_snapshot():
     shared = _make_shared_state(k=3)
     stop_event = threading.Event()
 
-    with gui_test_context(shared, stop_event, create_viewport=False, show_viewport=False, disable_preview=True) as app:
-        # After build_ui, stacked plots are not yet built; ensure them explicitly
-        app._ensure_plots(shared.traces.k)
+    app = ViewerApp(shared, stop_event)
+    app.plot_update_hz = 1000.0
+    app._preview_hz = 1000.0
 
-        assert dpg.does_item_exist("roi_view_window")
-        assert dpg.does_item_exist("roi_preview_child")
-        assert dpg.does_item_exist("roi_preview_drawlist")
+    app._update_preview_image(force=True)
+    assert app._preview_image is not None
 
-        # Stacked mode series should exist
-        assert dpg.does_item_exist("roi_series_stacked_0")
+    app._last_plot_update = 0.0
+    app.update_state()
+    assert len(app._series_data) == shared.traces.k
+    assert app._plot_x_limits is not None
+    assert app._overlay_limits is not None
+    assert len(app._colors_rgba) >= shared.traces.k
 
-        # Switch to overlay and ensure plots
-        app.display_mode = "Overlay"
-        app._plots_dirty = True
-        app._ensure_plots(shared.traces.k)
+    app.lock_global_y = True
+    app._locked_y_range = None
+    app._last_plot_update = 0.0
+    time.sleep(0.001)
+    app.update_state()
+    assert app._locked_y_range is not None
+    assert app._overlay_limits == app._locked_y_range
 
-        assert dpg.does_item_exist("roi_plot")
-        assert dpg.does_item_exist("roi_series_0")
+    app.display_mode = "Stacked"
+    assert len(app._stacked_limits) == shared.traces.k

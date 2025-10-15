@@ -114,7 +114,7 @@ Packaging and dependencies
 
 - `pyproject.toml`:
   - Runtime deps: `numpy`, `opencv-python`, `h5py`.
-  - Optional GUI: move `dearpygui` to an extra, e.g., `[project.optional-dependencies].gui`.
+  - Optional GUI: move `imgui-bundle` to an extra, e.g., `[project.optional-dependencies].gui`.
   - Dev/test extra: `[project.optional-dependencies].dev = ["pytest", "pytest-cov"]`.
   - Pytest config: add `[tool.pytest.ini_options]` with `testpaths` and `markers` including `offline`, `virtualcam`, and `gui`.
   - Entry points:
@@ -135,7 +135,7 @@ Milestones and deliverables
 
 2) Live preview + traces (next)
    - Shared ring buffer for timeseries and latest frame.
-   - Dear PyGui app adapted from stub; plot K series and image overlay.
+   - imgui_bundle app adapted from stub; plot K series and image overlay.
    - `--gui` flag to launch viewer alongside streaming.
    - Deliverable: smooth scrolling plot and periodic image refresh; CPU usage reasonable.
 

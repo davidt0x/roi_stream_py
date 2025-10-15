@@ -1,606 +1,402 @@
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
-import time
-import numpy as np
+from typing import List, Optional, Sequence, Tuple
 import colorsys
+import time
 
-
-def _lazy_import_dpg():
-    import dearpygui.dearpygui as dpg  # type: ignore
-    return dpg
+import cv2
+import numpy as np
+from imgui_bundle import ImVec2, ImVec4, hello_imgui, imgui, implot, immvision
 
 
 class ViewerApp:
-    """Dear PyGui viewer for ROI means traces.
-
-    Displays a scrolling plot of K ROI series using shared ring buffers.
-    """
+    """imgui-bundle viewer for ROI mean traces and preview frames."""
 
     def __init__(self, shared_state, stop_event, window_title: str = "ROI Stream Viewer") -> None:
         self.shared = shared_state
         self.stop_event = stop_event
         self.window_title = window_title
 
-        self.window_tag = "roi_view_window"
-        self.plot_tag = "roi_plot"
-        self.x_axis = None
-        self.y_axis = None
-        self.series_tags: List[str] = []
-        self.series_themes: List[int] = []
-        self.stats_tag = None
-
-        # X-axis window management (seconds)
         self.window_sec = 60.0
-        self._x_limits_set = False
+        self.preview_frac = 0.33
+        self.display_mode = "Stacked"
+        self.lock_global_y = False
+        self.plot_update_hz = 30.0
+        self._preview_hz = 30.0
+        self._stacked_plot_height = 140
 
-        # cache to avoid recreating series unnecessarily
-        self._last_k = None
-        self._colors_rgba: List[Tuple[int, int, int, int]] = []
+        self._stats_text = "ROIs=0  samples=0"
+        self._vp_w: Optional[float] = None
+        self._vp_h: Optional[float] = None
 
-        # Preview components
-        self._tex_registry_tag = "roi_tex_registry"
-        self._tex_tag = None
-        self._preview_header_tag = "roi_preview_header"
-        self._preview_child_tag = "roi_preview_child"
-        self._drawlist_tag = "roi_preview_drawlist"
-        self._last_tex_shape: Optional[Tuple[int, int]] = None  # (W, H)
-        self._last_tex_update = 0.0
-        self._preview_hz = 20.0  # limit texture updates
-        self._raw_rgba: Optional[np.ndarray] = None  # float32 (H, W, 4)
-        # Viewport sync
-        self._vp_w: Optional[int] = None
-        self._vp_h: Optional[int] = None
-        # Preview sizing (fraction of viewport height)
-        self.preview_frac: float = 0.33
-        # Plot display mode and containers (default to Stacked)
-        self.display_mode: str = "Stacked"  # or "Overlay"
-        self._plots_container_tag = "roi_plots_container"
-        self._plots_dirty = True
-        # Stacked mode bookkeeping
-        self._stacked_plot_tags: List[str] = []
-        self._stacked_series_tags: List[str] = []
-        self._stacked_x_axes: List[int] = []
-        self._stacked_y_axes: List[int] = []
-        self._stacked_label_tags: List[str] = []
-        self._stacked_plot_height: int = 140
-        # Plot performance controls
-        self.plot_update_hz: float = 30.0
-        self._last_plot_update: float = 0.0
-        # Global Y lock
-        self.lock_global_y: bool = False
+        self._series_data: List[Tuple[np.ndarray, np.ndarray]] = []
+        self._plot_x_limits: Optional[Tuple[float, float]] = None
+        self._overlay_limits: Optional[Tuple[float, float]] = None
+        self._stacked_limits: List[Optional[Tuple[float, float]]] = []
         self._locked_y_range: Optional[Tuple[float, float]] = None
-        # X-axis uses a fixed-length sliding window of size window_sec
-        # Lifecycle flags
-        self._setup_done: bool = False
-        self._owns_context: bool = False
 
-    def build_ui(self):
-        dpg = _lazy_import_dpg()
-        with dpg.window(tag=self.window_tag, label=self.window_title, width=1000, height=650):
-            with dpg.collapsing_header(tag=self._preview_header_tag, label="Preview", default_open=True):
-                with dpg.group(horizontal=True):
-                    dpg.add_text("Preview height (fraction)")
-                    dpg.add_slider_float(label="", default_value=self.preview_frac,
-                                         min_value=0.10, max_value=0.60, format="%.2f",
-                                         callback=self._on_preview_frac_change, width=200)
-                # Child window provides a sized area; drawlist fills it
-                with dpg.child_window(tag=self._preview_child_tag, width=-1, height=400, border=True):
-                    dpg.add_drawlist(tag=self._drawlist_tag, width=-1, height=-1)
+        self._last_plot_update = 0.0
+        self._last_preview_update = 0.0
+        self._preview_image: Optional[np.ndarray] = None
 
-            with dpg.group(horizontal=True):
-                with dpg.group(horizontal=True):
-                    dpg.add_text("X window (s)")
-                    dpg.add_input_float(label="", default_value=self.window_sec, min_value=5.0,
-                                        min_clamped=True, step=5.0, width=140, callback=self._on_window_change)
-                with dpg.group(horizontal=True):
-                    dpg.add_text("Single Plot")
-                    dpg.add_checkbox(label="", default_value=False, callback=self._on_single_plot_toggle)
-                with dpg.group(horizontal=True):
-                    dpg.add_text("Lock global Y")
-                    dpg.add_checkbox(label="", default_value=self.lock_global_y,
-                                     callback=self._on_lock_y_toggle)
-                # X-axis uses a fixed-length sliding window; no separate mode toggle
+        self._colors_rgba: List[Tuple[int, int, int, int]] = []
+        self._colors_bgr: List[Tuple[int, int, int]] = []
+        self._colors_implot: List[ImVec4] = []
+        self._palette_size = 0
 
-            self.stats_tag = dpg.add_text("ROIs=0  samples=0")
-            # Container for plots (overlay or stacked)
-            with dpg.child_window(tag=self._plots_container_tag, width=-1, height=-1, border=False):
-                pass
-        # Make this the primary window so it follows viewport events
-        dpg.set_primary_window(self.window_tag, True)
+        self._runner_params: Optional[hello_imgui.RunnerParams] = None
+        self._owns_implot_context = False
+        self._setup_done = False
 
-    def _on_window_change(self, sender, app_data, *_):
-        try:
-            val = float(app_data)
-        except Exception:
-            return
-        self.window_sec = max(5.0, val)
-        self._x_limits_set = False
-
-    def _on_preview_frac_change(self, sender, app_data, *_):
-        try:
-            v = float(app_data)
-        except Exception:
-            return
-        self.preview_frac = float(min(0.9, max(0.05, v)))
-    def _on_lock_y_toggle(self, sender, app_data, *_):
-        self.lock_global_y = bool(app_data)
-        # Reset cached lock so it captures current range on next frame
-        self._locked_y_range = None
-
-    # No x-mode change; sliding window is always used
-
-    def _ensure_series(self, k: int):
-        dpg = _lazy_import_dpg()
-        if self._last_k == k and len(self.series_tags) == k:
-            return
-        # Recreate series
-        if self.series_tags:
-            for tag in self.series_tags:
-                try:
-                    dpg.delete_item(tag)
-                except Exception:
-                    pass
-        self.series_tags = []
-        self.series_themes = []
-        # Build color palette for K series
-        self._colors_rgba = self._build_palette(k)
-        for i in range(k):
-            tag = f"roi_series_{i}"
-            self.series_tags.append(tag)
-            dpg.add_line_series([], [], tag=tag, parent=self.y_axis)
-            # Create theme for this series color
-            color = self._colors_rgba[i]
-            with dpg.theme() as th:
-                with dpg.theme_component(dpg.mvLineSeries):
-                    dpg.add_theme_color(dpg.mvPlotCol_Line, color, category=dpg.mvThemeCat_Plots)
-            dpg.bind_item_theme(tag, th)
-            self.series_themes.append(th)
-        self._last_k = k
-        self._x_limits_set = False
-
-    def _build_palette(self, k: int) -> List[Tuple[int, int, int, int]]:
-        """Generate K distinct RGBA colors (0..255) using evenly spaced HSV hues."""
-        if k <= 0:
+    def _build_palette(self, count: int) -> List[Tuple[int, int, int, int]]:
+        if count <= 0:
             return []
         colors: List[Tuple[int, int, int, int]] = []
-        for i in range(k):
-            h = (i / max(1, k)) % 1.0
+        for i in range(count):
+            h = (i / max(1, count)) % 1.0
             s = 0.85
             v = 0.95
             r, g, b = colorsys.hsv_to_rgb(h, s, v)
             colors.append((int(r * 255), int(g * 255), int(b * 255), 255))
         return colors
 
-    def _clear_plots_container(self):
-        dpg = _lazy_import_dpg()
-        try:
-            dpg.delete_item(self._plots_container_tag, children_only=True)
-        except Exception:
-            pass
-        # Reset overlay bookkeeping
-        self.x_axis = None
-        self.y_axis = None
-        self.series_tags = []
-        self.series_themes = []
-        # Reset stacked bookkeeping
-        self._stacked_plot_tags = []
-        self._stacked_series_tags = []
-        self._stacked_x_axes = []
-        self._stacked_y_axes = []
-        self._stacked_label_tags = []
-        self._last_k = None
-        self._x_limits_set = False
-
-    def _build_overlay_plots(self, k: int):
-        dpg = _lazy_import_dpg()
-        with dpg.plot(label="ROI Means", width=-1, height=-1, tag=self.plot_tag, parent=self._plots_container_tag):
-            self.x_axis = dpg.add_plot_axis(dpg.mvXAxis, label="Time (s)")
-            self.y_axis = dpg.add_plot_axis(dpg.mvYAxis, label="Mean")
-        # Create line series for overlay
-        self._ensure_series(k)
-
-    def _build_stacked_plots(self, k: int):
-        dpg = _lazy_import_dpg()
-        self._colors_rgba = self._build_palette(k)
-        for i in range(k):
-            # Row container: text label on the left, plot on the right
-            row_tag = f"roi_row_{i}"
-            with dpg.group(horizontal=True, parent=self._plots_container_tag, tag=row_tag):
-                # Add label text outside the plot, before Y-axis
-                color = self._colors_rgba[i]
-                label_tag = f"roi_label_{i}"
-                dpg.add_text(f"ROI {i}", tag=label_tag, color=color)
-                plot_tag = f"roi_plot_{i}"
-                with dpg.plot(label="", width=-1, height=self._stacked_plot_height, tag=plot_tag):
-                    xax = dpg.add_plot_axis(dpg.mvXAxis, label="Time (s)")
-                    yax = dpg.add_plot_axis(dpg.mvYAxis, label="Mean")
-                    series_tag = f"roi_series_stacked_{i}"
-                    dpg.add_line_series([], [], tag=series_tag, parent=yax)
-                    # Color theme for the series
-                    with dpg.theme() as th:
-                        with dpg.theme_component(dpg.mvLineSeries):
-                            dpg.add_theme_color(dpg.mvPlotCol_Line, color, category=dpg.mvThemeCat_Plots)
-                    dpg.bind_item_theme(series_tag, th)
-            self._stacked_plot_tags.append(plot_tag)
-            self._stacked_series_tags.append(series_tag)
-            self._stacked_x_axes.append(xax)
-            self._stacked_y_axes.append(yax)
-            self._stacked_label_tags.append(label_tag)
-        # Track current K to avoid rebuild flicker
-        self._last_k = k
-
-    def _ensure_plots(self, k: int):
-        dpg = _lazy_import_dpg()
-        # Rebuild if dirty or K changed
-        if self._plots_dirty or self._last_k != k:
-            self._clear_plots_container()
-            if self.display_mode == "Overlay":
-                self._build_overlay_plots(k)
-            else:
-                self._build_stacked_plots(k)
-            self._plots_dirty = False
-
-    def _on_single_plot_toggle(self, sender, app_data, *_):
-        # Checkbox: True => Single Plot (Overlay), False => Stacked
-        single = bool(app_data)
-        self.display_mode = "Overlay" if single else "Stacked"
-        self._plots_dirty = True
-
-    def _ensure_texture(self, W: int, H: int):
-        dpg = _lazy_import_dpg()
-        if self._tex_tag is not None and self._last_tex_shape == (W, H) and self._raw_rgba is not None:
+    def _ensure_palette(self, count: int) -> None:
+        if count <= 0:
+            self._colors_rgba = []
+            self._colors_bgr = []
+            self._colors_implot = []
+            self._palette_size = 0
             return
-        # Create or recreate RAW texture backed by a persistent numpy array
-        # Ensure registry exists
-        if not dpg.does_item_exist(self._tex_registry_tag):
-            with dpg.texture_registry(tag=self._tex_registry_tag):
-                pass
-        # Delete old texture if present
-        if self._tex_tag is not None and dpg.does_item_exist(self._tex_tag):
-            try:
-                dpg.delete_item(self._tex_tag)
-            except Exception:
-                pass
-        # Allocate persistent buffer (H, W, 4) float32 in [0,1]
-        self._raw_rgba = np.zeros((H, W, 4), dtype=np.float32)
-        self._raw_rgba[..., 3] = 1.0  # opaque
-        # add_raw_texture expects format + width/height + buffer
-        self._tex_tag = dpg.add_raw_texture(format=dpg.mvFormat_Float_rgba, width=W, height=H,
-                                            default_value=self._raw_rgba, parent=self._tex_registry_tag)
-        self._last_tex_shape = (W, H)
+        if count <= self._palette_size:
+            return
+        colors = self._build_palette(count)
+        self._colors_rgba = colors
+        self._colors_bgr = [(c[2], c[1], c[0]) for c in colors]
+        self._colors_implot = [ImVec4(c[0] / 255.0, c[1] / 255.0, c[2] / 255.0, c[3] / 255.0) for c in colors]
+        self._palette_size = count
 
-    def _update_preview(self):
-        # Only draw preview when the header is expanded (visible)
-        dpg = _lazy_import_dpg()
-        try:
-            if not bool(dpg.get_item_open(self._preview_header_tag)):
-                return
-        except Exception:
-            # If unable to query, assume visible
-            pass
+    @staticmethod
+    def _pad_range(ymin: float, ymax: float) -> Tuple[float, float]:
+        if ymin == ymax:
+            pad = 1.0 if ymin == 0 else abs(ymin) * 0.1 + 1.0
+            return float(ymin - pad), float(ymax + pad)
+        span = ymax - ymin
+        pad = span * 0.10
+        return float(ymin - pad), float(ymax + pad)
 
-        # Avoid copying the full frame unless we're about to update the texture.
+    @staticmethod
+    def _align_series(t: Sequence[float], y: Sequence[float]) -> Tuple[np.ndarray, np.ndarray]:
+        t_arr = np.asarray(t, dtype=np.float64)
+        y_arr = np.asarray(y, dtype=np.float64)
+        if t_arr.size == 0 or y_arr.size == 0:
+            empty = np.asarray([], dtype=np.float64)
+            return empty, empty
+        n = int(min(t_arr.size, y_arr.size))
+        if t_arr.size != n:
+            t_arr = t_arr[-n:]
+        if y_arr.size != n:
+            y_arr = y_arr[-n:]
+        return t_arr.copy(), y_arr.copy()
+
+    def _update_preview_image(self, *, force: bool = False) -> None:
+        interval = 1.0 / max(1e-6, self._preview_hz)
+        now = time.time()
+        if not force and (now - self._last_preview_update) < interval:
+            return
+        frame = self.shared.get_frame()
+        if frame is None or frame.ndim != 2:
+            return
+        gray16 = np.asarray(frame, dtype=np.uint16)
+        gray8 = np.right_shift(gray16, 8).astype(np.uint8)
+        image = cv2.cvtColor(gray8, cv2.COLOR_GRAY2BGR)
         circles = self.shared.circles
-        res = self.shared.resolution
-        if circles is None or res is None:
-            return
-        W, H = int(res[0]), int(res[1])
-        if W <= 0 or H <= 0:
-            return
-        # Ensure texture exists to render the last image (even if not updating pixels this frame)
-        self._ensure_texture(W, H)
+        if circles is not None and len(circles) > 0:
+            palette = self._colors_bgr or [(0, 0, 255)]
+            for idx, circle in enumerate(circles):
+                cx = int(round(float(circle[0])))
+                cy = int(round(float(circle[1])))
+                radius = int(max(1.0, float(circle[2])))
+                color = palette[idx % len(palette)]
+                cv2.circle(image, (cx, cy), radius, color, thickness=2)
+        self._preview_image = image
+        self._last_preview_update = now
 
+    def update_state(self) -> None:
+        traces = self.shared.traces
+        k = int(traces.k)
+        total = 0
+        try:
+            total = int(traces.total_count())
+        except Exception:
+            total = 0
+        tlast = traces.last_time()
+        self._stats_text = f"ROIs={k}  samples={total}  t={tlast:0.2f}s"
+
+        circle_count = int(len(self.shared.circles)) if self.shared.circles is not None else 0
+        self._ensure_palette(max(k, circle_count))
+        self._update_preview_image()
+
+        interval = 1.0 / max(1e-6, self.plot_update_hz)
         now = time.time()
-        if (now - self._last_tex_update) >= (1.0 / self._preview_hz):
-            # Pull the latest frame and upload to the texture buffer
-            frame = self.shared.get_frame()
-            if frame is not None:
-                Hf, Wf = frame.shape
-                # If resolution changed, recreate texture and update our local W/H
-                if (Hf != H) or (Wf != W):
-                    W, H = int(Wf), int(Hf)
-                self._ensure_texture(W, H)
-                # Normalize uint16 to float32 into the persistent raw buffer
-                if self._raw_rgba is not None:
-                    self._raw_rgba[..., 0] = frame.astype(np.float32) / 65535.0
-                    self._raw_rgba[..., 1] = self._raw_rgba[..., 0]
-                    self._raw_rgba[..., 2] = self._raw_rgba[..., 0]
-                self._last_tex_update = now
-
-        # Clear drawlist and draw image + circles
-        try:
-            dpg.delete_item(self._drawlist_tag, children_only=True)
-        except Exception:
-            pass
-
-        # Draw image to fit drawlist width while preserving aspect ratio
-        # Compute display size
-        # Use child window size as available drawing area, then rely on the
-        # actual drawlist size for transform to keep overlays aligned.
-        child_w, child_h = dpg.get_item_rect_size(self._preview_child_tag)
-        if child_w <= 0:
-            child_w = W
-        if child_h <= 0:
-            child_h = H
-        # Keep drawlist sized to the child content region
-        try:
-            dpg.configure_item(self._drawlist_tag, width=child_w, height=child_h)
-        except Exception:
-            pass
-        dl_w, dl_h = dpg.get_item_rect_size(self._drawlist_tag)
-        if dl_w <= 0:
-            dl_w = child_w
-        if dl_h <= 0:
-            dl_h = child_h
-        sx = dl_w / float(W)
-        sy = dl_h / float(H)
-        s = min(sx, sy)
-        disp_w = int(W * s)
-        disp_h = int(H * s)
-        offset_x = 0
-        offset_y = 0
-        # Center within drawlist if there is remaining space
-        if dl_w > disp_w:
-            offset_x = (dl_w - disp_w) // 2
-        if dl_h > disp_h:
-            offset_y = (dl_h - disp_h) // 2
-
-        pmin = (float(offset_x), float(offset_y))
-        pmax = (float(offset_x + disp_w), float(offset_y + disp_h))
-        dpg.draw_image(self._tex_tag, pmin, pmax, parent=self._drawlist_tag)
-
-        # Draw ROI circles (scaled)
-        thickness = 2
-        for idx, row in enumerate(circles):
-            xc, yc, r = float(row[0]), float(row[1]), float(row[2])
-            cx = float(offset_x) + float(xc * s)
-            cy = float(offset_y) + float(yc * s)
-            rr = max(1.0, float(r * s))
-            color = self._colors_rgba[idx] if idx < len(self._colors_rgba) else (255, 0, 0, 255)
-            dpg.draw_circle((cx, cy), rr, color=color, thickness=thickness, parent=self._drawlist_tag)
-
-    def on_frame(self):
-        dpg = _lazy_import_dpg()
-        
-        # Keep the main window and preview child sized to the viewport
-        vp_w = dpg.get_viewport_client_width()
-        vp_h = dpg.get_viewport_client_height()
-        # Always sync sizes to viewport, and set preview child to a fraction of viewport height
-        self._vp_w, self._vp_h = vp_w, vp_h
-        try:
-            dpg.set_item_pos(self.window_tag, (0, 0))
-            dpg.set_item_width(self.window_tag, max(1, vp_w))
-            dpg.set_item_height(self.window_tag, max(1, vp_h))
-            # Compute preview height only if header is expanded
-            prev_h = 0
-            header_open = True
-            try:
-                header_open = bool(dpg.get_item_open(self._preview_header_tag))
-            except Exception:
-                pass
-            if header_open:
-                prev_h = max(120, int(vp_h * self.preview_frac))
-            # Size and show/hide preview child accordingly
-            dpg.configure_item(self._preview_child_tag, width=max(1, vp_w), height=max(0, prev_h), show=header_open)
-            # Do not override plot container height; let it auto-fill remaining space.
-        except Exception:
-            pass
-        # Update preview image/overlays
-        self._update_preview()
-
-        # Prepare traces for plotting using a windowed snapshot to avoid copying entire history
-        tlast = self.shared.traces.last_time()
-        if tlast <= 0.0:
+        if (now - self._last_plot_update) < interval:
             return
-        now = time.time()
-        do_update = (now - self._last_plot_update) >= (1.0 / max(1e-6, self.plot_update_hz))
-        # Fixed-length sliding window: always keep an axis width of window_sec
+
         x0 = max(0.0, tlast - self.window_sec)
         x1 = x0 + max(self.window_sec, 1e-3)
-        if not do_update:
-            # Lightweight stats update without building windowed copies
-            k = int(self.shared.traces.k)
-            total_pts = 0
-            try:
-                total_pts = int(self.shared.traces.total_count())
-            except Exception:
-                pass
-            dpg.set_value(self.stats_tag, f"ROIs={k}  samples={total_pts}  t={tlast:0.2f}s")
+        t_values, series_values = traces.snapshot_window(start_time=x0)
+        if not t_values or not series_values:
+            self._series_data = []
+            self._plot_x_limits = None
+            self._overlay_limits = None
+            self._stacked_limits = []
+            self._last_plot_update = now
             return
 
-        # Build windowed snapshot only when performing a plot update
-        t, ys = self.shared.traces.snapshot_window(start_time=x0)
-        k = len(ys)
-        if k == 0 or not t:
-            return
-        # Ensure plots for current mode and K
-        self._ensure_plots(k)
-        tmax = float(t[-1])
-
-        if self.display_mode == "Overlay":
-            # Update series in overlay plot
-            y_min = None
-            y_max = None
-            for i, tag in enumerate(self.series_tags):
-                yi = ys[i]
-                # Align lengths defensively
-                if len(yi) != len(t):
-                    n = min(len(yi), len(t))
-                    yi = yi[-n:]
-                    tv = t[-n:]
-                else:
-                    tv = t
-                dpg.set_value(tag, [tv, yi])
-                if yi:
-                    ymin = min(yi)
-                    ymax = max(yi)
-                    y_min = ymin if y_min is None else min(y_min, ymin)
-                    y_max = ymax if y_max is None else max(y_max, ymax)
-            dpg.set_axis_limits(self.x_axis, x0, x1)
-            if y_min is not None and y_max is not None:
-                if self.lock_global_y:
-                    # Use cached lock or capture now
-                    if self._locked_y_range is None:
-                        if y_min == y_max:
-                            pad = 1.0 if y_min == 0 else abs(y_min) * 0.1 + 1.0
-                            y0 = y_min - pad
-                            y1 = y_max + pad
-                        else:
-                            pad = (y_max - y_min) * 0.10
-                            y0 = y_min - pad
-                            y1 = y_max + pad
-                        self._locked_y_range = (float(y0), float(y1))
-                    y0, y1 = self._locked_y_range
-                    dpg.set_axis_limits(self.y_axis, float(y0), float(y1))
-                else:
-                    if y_min == y_max:
-                        pad = 1.0 if y_min == 0 else abs(y_min) * 0.1 + 1.0
-                        y0 = y_min - pad
-                        y1 = y_max + pad
-                    else:
-                        pad = (y_max - y_min) * 0.10
-                        y0 = y_min - pad
-                        y1 = y_max + pad
-                    dpg.set_axis_limits(self.y_axis, float(y0), float(y1))
-        else:
-            # Stacked mode: update only visible plots to reduce workload
-            # Determine visible index range based on scroll and container height
-            cont_w, cont_h = dpg.get_item_rect_size(self._plots_container_tag)
-            try:
-                yscroll = dpg.get_y_scroll(self._plots_container_tag)
-            except Exception:
-                yscroll = 0.0
-            if self._stacked_plot_height <= 0:
-                vis_start = 0
-                vis_end = k
+        new_series: List[Tuple[np.ndarray, np.ndarray]] = []
+        stacked_ranges: List[Optional[Tuple[float, float]]] = []
+        global_min: Optional[float] = None
+        global_max: Optional[float] = None
+        for values in series_values:
+            xs, ys = self._align_series(t_values, values)
+            new_series.append((xs, ys))
+            if ys.size:
+                ymin = float(np.min(ys))
+                ymax = float(np.max(ys))
+                y0, y1 = self._pad_range(ymin, ymax)
+                stacked_ranges.append((y0, y1))
+                global_min = ymin if global_min is None else min(global_min, ymin)
+                global_max = ymax if global_max is None else max(global_max, ymax)
             else:
-                vis_start = max(0, int(yscroll // self._stacked_plot_height))
-                visible_rows = int(max(1, cont_h // self._stacked_plot_height)) + 2
-                vis_end = min(k, vis_start + visible_rows)
+                stacked_ranges.append(None)
 
-            # If locking globally, compute a combined y range for visible plots
-            g_min = None
-            g_max = None
+        self._series_data = new_series
+        self._plot_x_limits = (float(x0), float(x1))
+        if not self.lock_global_y:
+            self._locked_y_range = None
+        if global_min is not None and global_max is not None:
+            desired = self._pad_range(global_min, global_max)
             if self.lock_global_y:
-                for i in range(vis_start, min(vis_end, len(self._stacked_series_tags))):
-                    yi = ys[i]
-                    if len(yi) != len(t):
-                        n = min(len(yi), len(t))
-                        yi = yi[-n:]
-                    if yi:
-                        ymin = min(yi)
-                        ymax = max(yi)
-                        g_min = ymin if g_min is None else min(g_min, ymin)
-                        g_max = ymax if g_max is None else max(g_max, ymax)
-                if g_min is not None and g_max is not None:
-                    if self._locked_y_range is None:
-                        if g_min == g_max:
-                            pad = 1.0 if g_min == 0 else abs(g_min) * 0.1 + 1.0
-                            y0 = g_min - pad
-                            y1 = g_max + pad
-                        else:
-                            pad = (g_max - g_min) * 0.10
-                            y0 = g_min - pad
-                            y1 = g_max + pad
-                        self._locked_y_range = (float(y0), float(y1))
-                    y0, y1 = self._locked_y_range
+                if self._locked_y_range is None:
+                    self._locked_y_range = desired
+                self._overlay_limits = self._locked_y_range
+            else:
+                self._overlay_limits = desired
+        else:
+            self._overlay_limits = None
 
-            for i in range(0, min(k, len(self._stacked_series_tags))):
-                if i < vis_start or i >= vis_end:
-                    # Skip updates for non-visible plots
-                    continue
-                series_tag = self._stacked_series_tags[i]
-                xax = self._stacked_x_axes[i]
-                yax = self._stacked_y_axes[i]
-                yi = ys[i]
-                if len(yi) != len(t):
-                    n = min(len(yi), len(t))
-                    yi = yi[-n:]
-                    tv = t[-n:]
-                else:
-                    tv = t
-                dpg.set_value(series_tag, [tv, yi])
-                # Axis limits
-                dpg.set_axis_limits(xax, x0, x1)
-                if yi:
-                    if self.lock_global_y and self._locked_y_range is not None:
-                        ly0, ly1 = self._locked_y_range
-                        dpg.set_axis_limits(yax, float(ly0), float(ly1))
-                        y0, y1 = float(ly0), float(ly1)
-                    else:
-                        ymin = min(yi)
-                        ymax = max(yi)
-                        if ymin == ymax:
-                            pad = 1.0 if ymin == 0 else abs(ymin) * 0.1 + 1.0
-                            y0 = ymin - pad
-                            y1 = ymax + pad
-                        else:
-                            pad = (ymax - ymin) * 0.10
-                            y0 = ymin - pad
-                            y1 = ymax + pad
-                        dpg.set_axis_limits(yax, float(y0), float(y1))
-                    # No per-frame label updates needed (static text outside plots)
+        if self.lock_global_y and self._locked_y_range is not None:
+            lock_range = self._locked_y_range
+            self._stacked_limits = [lock_range if ys.size else None for _, ys in new_series]
+        else:
+            self._stacked_limits = stacked_ranges
 
-        total_pts = 0
-        try:
-            total_pts = int(self.shared.traces.total_count())
-        except Exception:
-            total_pts = len(t)
-        dpg.set_value(self.stats_tag, f"ROIs={k}  samples={total_pts}  t={tmax:0.2f}s")
         self._last_plot_update = now
 
-    def setup(self, *, width: int = 1000, height: int = 650) -> None:
-        """Create Dear PyGui context, viewport, and build the UI."""
-        if self._setup_done:
+    def _compute_preview_display_size(self, avail_w: float, avail_h: float) -> Tuple[float, float]:
+        if self._preview_image is None:
+            return avail_w, avail_h
+        h, w = self._preview_image.shape[:2]
+        if w <= 0 or h <= 0:
+            return avail_w, avail_h
+        if avail_w <= 0.0 or avail_h <= 0.0:
+            return float(w), float(h)
+        scale = min(avail_w / float(w), avail_h / float(h))
+        return float(w) * scale, float(h) * scale
+
+    def _render_preview(self, preview_height: float) -> None:
+        imgui.begin_child(
+            "roi_preview_child",
+            size=ImVec2(0.0, preview_height),
+            child_flags=imgui.ChildFlags_.borders,
+        )
+        if self._preview_image is None:
+            imgui.text_disabled("Preview unavailable")
+        else:
+            avail = imgui.get_content_region_avail()
+            disp_w, disp_h = self._compute_preview_display_size(avail.x, avail.y)
+            cursor = imgui.get_cursor_pos()
+            offset_x = max(0.0, (avail.x - disp_w) * 0.5)
+            offset_y = max(0.0, (avail.y - disp_h) * 0.5)
+            imgui.set_cursor_pos(ImVec2(cursor.x + offset_x, cursor.y + offset_y))
+            immvision.push_color_order_bgr()
+            immvision.image_display_resizable(
+                "roi_preview_image",
+                self._preview_image,
+                size=ImVec2(disp_w, disp_h),
+                refresh_image=True,
+                resizable=False,
+                show_options_button=False,
+            )
+            immvision.pop_color_order()
+            imgui.set_cursor_pos(cursor)
+        imgui.end_child()
+
+    def _render_control_row(self) -> None:
+        imgui.push_item_width(160.0)
+        changed, value = imgui.input_float("X window (s)", self.window_sec, step=5.0, format="%.1f")
+        if changed:
+            self.window_sec = max(5.0, float(value))
+        imgui.pop_item_width()
+        imgui.same_line()
+        single_plot = self.display_mode == "Overlay"
+        changed, single_plot = imgui.checkbox("Single Plot", single_plot)
+        if changed:
+            self.display_mode = "Overlay" if single_plot else "Stacked"
+        imgui.same_line()
+        changed, lock = imgui.checkbox("Lock global Y", self.lock_global_y)
+        if changed:
+            self.lock_global_y = bool(lock)
+            self._locked_y_range = None
+
+        imgui.new_line()
+
+    def _render_overlay_plot(self) -> None:
+        if not self._series_data or self._plot_x_limits is None:
+            imgui.text_disabled("No traces available")
+            return
+        x0, x1 = self._plot_x_limits
+        implot.set_next_axis_limits(implot.ImAxis_.x1, x0, x1, cond=implot.Cond_.always)
+        if self._overlay_limits is not None:
+            y0, y1 = self._overlay_limits
+            implot.set_next_axis_limits(implot.ImAxis_.y1, y0, y1, cond=implot.Cond_.always)
+        if implot.begin_plot("ROI Means", size=ImVec2(-1.0, -1.0)):
+            implot.setup_axes("Time (s)", "Mean")
+            for idx, (xs, ys) in enumerate(self._series_data):
+                if xs.size == 0 or ys.size == 0:
+                    continue
+                if idx < len(self._colors_implot):
+                    implot.set_next_line_style(self._colors_implot[idx])
+                implot.plot_line(f"ROI {idx}", xs, ys)
+            implot.end_plot()
+
+    def _render_stacked_plots(self) -> None:
+        if not self._series_data or self._plot_x_limits is None:
+            imgui.text_disabled("No traces available")
+            return
+        x0, x1 = self._plot_x_limits
+        for idx, (xs, ys) in enumerate(self._series_data):
+            imgui.push_id(idx)
+            color = self._colors_implot[idx % len(self._colors_implot)] if self._colors_implot else ImVec4(1.0, 0.0, 0.0, 1.0)
+            imgui.align_text_to_frame_padding()
+            imgui.text_colored(color, f"ROI {idx}")
+            imgui.same_line()
+            implot.set_next_axis_limits(implot.ImAxis_.x1, x0, x1, cond=implot.Cond_.always)
+            if self.lock_global_y and self._locked_y_range is not None:
+                y_limits = self._locked_y_range
+            else:
+                y_limits = self._stacked_limits[idx] if idx < len(self._stacked_limits) else None
+            if y_limits is not None:
+                implot.set_next_axis_limits(implot.ImAxis_.y1, y_limits[0], y_limits[1], cond=implot.Cond_.always)
+            flags = implot.Flags_.no_menus | implot.Flags_.no_box_select
+            if implot.begin_plot("##roi_plot", size=ImVec2(-1.0, float(self._stacked_plot_height)), flags=flags):
+                implot.setup_axes("Time (s)", "Mean")
+                if xs.size and ys.size:
+                    if idx < len(self._colors_implot):
+                        implot.set_next_line_style(self._colors_implot[idx])
+                    implot.plot_line("##series", xs, ys)
+                implot.end_plot()
+            imgui.pop_id()
+            if idx < len(self._series_data) - 1:
+                imgui.spacing()
+
+    def render_gui(self) -> None:
+        viewport = imgui.get_main_viewport()
+        if viewport is not None:
+            pos = viewport.pos
+            size = viewport.size
+            self._vp_w = size.x
+            self._vp_h = size.y
+            imgui.set_next_window_pos(pos, cond=imgui.Cond_.always)
+            imgui.set_next_window_size(size, cond=imgui.Cond_.always)
+
+        flags = imgui.WindowFlags_.no_resize | imgui.WindowFlags_.no_move | imgui.WindowFlags_.no_collapse
+        if not imgui.begin(self.window_title, flags=flags):
+            imgui.end()
             return
 
-        dpg = _lazy_import_dpg()
-        dpg.create_context()
-        self._owns_context = True
-        dpg.create_viewport(title=self.window_title, width=int(width), height=int(height))
+        preview_open = imgui.collapsing_header("Preview", flags=imgui.TreeNodeFlags_.default_open)
+        if preview_open:
+            changed, value = imgui.slider_float("Preview height (fraction)", self.preview_frac, 0.10, 0.60, "%.2f")
+            if changed:
+                self.preview_frac = float(min(0.9, max(0.05, value)))
+            vp_h = self._vp_h if self._vp_h is not None else 600.0
+            preview_height = max(120.0, vp_h * self.preview_frac)
+            self._render_preview(preview_height)
+        else:
+            preview_height = 0.0
 
-        self.build_ui()
-        dpg.setup_dearpygui()
-        dpg.show_viewport()
+        if preview_open and preview_height > 0:
+            imgui.spacing()
 
+        self._render_control_row()
+        imgui.text_unformatted(self._stats_text)
+        imgui.spacing()
+
+        avail = imgui.get_content_region_avail()
+        imgui.begin_child("roi_plots", size=ImVec2(0.0, avail.y))
+        if self.display_mode == "Overlay":
+            self._render_overlay_plot()
+        else:
+            self._render_stacked_plots()
+        imgui.end_child()
+        imgui.end()
+
+    def _on_pre_frame(self) -> None:
+        if self.stop_event.is_set() and self._runner_params is not None:
+            self._runner_params.app_shall_exit = True
+        self.update_state()
+
+    def _on_post_init(self) -> None:
+        if not self._owns_implot_context:
+            implot.create_context()
+            try:
+                implot.set_imgui_context(imgui.get_current_context())
+            except Exception:
+                pass
+            self._owns_implot_context = True
+
+    def _on_before_exit(self) -> None:
         try:
-            dpg.set_exit_callback(lambda: self.stop_event.set())
+            self.stop_event.set()
         except Exception:
             pass
-        try:
-            dpg.maximize_viewport()
-        except Exception:
-            pass
 
+    def setup(self, *, width: int = 1000, height: int = 650) -> None:
+        if self._setup_done:
+            return
+        callbacks = hello_imgui.RunnerCallbacks(
+            show_gui=self.render_gui,
+            pre_new_frame=self._on_pre_frame,
+            post_init=self._on_post_init,
+            before_exit=self._on_before_exit,
+        )
+        geometry = hello_imgui.WindowGeometry(size=(int(width), int(height)))
+        app_params = hello_imgui.AppWindowParams(window_title=self.window_title, window_geometry=geometry)
+        imgui_params = hello_imgui.ImGuiWindowParams(
+            default_imgui_window_type=hello_imgui.DefaultImGuiWindowType.no_default_window,
+            show_menu_bar=False,
+        )
+        self._runner_params = hello_imgui.RunnerParams(
+            callbacks=callbacks,
+            app_window_params=app_params,
+            imgui_window_params=imgui_params,
+        )
         self._setup_done = True
 
     def start(self) -> None:
-        """Enter the Dear PyGui render loop until stopped."""
-        if not self._setup_done:
+        if not self._setup_done or self._runner_params is None:
             raise RuntimeError("ViewerApp.setup() must be called before start().")
-
-        dpg = _lazy_import_dpg()
-        while dpg.is_dearpygui_running():
-            if self.stop_event.is_set():
-                dpg.stop_dearpygui()
-                break
-            self.on_frame()
-            dpg.render_dearpygui_frame()
+        hello_imgui.run(self._runner_params)
 
     def teardown(self) -> None:
-        """Destroy the Dear PyGui context if this app created it."""
-        if not self._owns_context:
-            return
-
-        dpg = _lazy_import_dpg()
-        try:
-            dpg.destroy_context()
-        except Exception:
-            pass
-        finally:
-            self._owns_context = False
-            self._setup_done = False
+        if self._owns_implot_context:
+            try:
+                implot.destroy_context()
+            except Exception:
+                pass
+            self._owns_implot_context = False
+        self._runner_params = None
+        self._setup_done = False
 
 
 def run_gui(shared_state, stop_event) -> None:

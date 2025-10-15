@@ -11,7 +11,7 @@ dependencies = [
     "numpy>=1.26",
     "opencv-python>=4.8.0",
     "h5py>=3.9.0",
-    "dearpygui>=2.1.0",
+    "imgui-bundle>=1.92.4",
 ]
 
 [build-system]
