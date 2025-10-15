@@ -71,6 +71,9 @@ class ViewerApp:
         self.lock_global_y: bool = False
         self._locked_y_range: Optional[Tuple[float, float]] = None
         # X-axis uses a fixed-length sliding window of size window_sec
+        # Lifecycle flags
+        self._setup_done: bool = False
+        self._owns_context: bool = False
 
     def build_ui(self):
         dpg = _lazy_import_dpg()
@@ -547,37 +550,64 @@ class ViewerApp:
         dpg.set_value(self.stats_tag, f"ROIs={k}  samples={total_pts}  t={tmax:0.2f}s")
         self._last_plot_update = now
 
+    def setup(self, *, width: int = 1000, height: int = 650) -> None:
+        """Create Dear PyGui context, viewport, and build the UI."""
+        if self._setup_done:
+            return
+
+        dpg = _lazy_import_dpg()
+        dpg.create_context()
+        self._owns_context = True
+        dpg.create_viewport(title=self.window_title, width=int(width), height=int(height))
+
+        self.build_ui()
+        dpg.setup_dearpygui()
+        dpg.show_viewport()
+
+        try:
+            dpg.set_exit_callback(lambda: self.stop_event.set())
+        except Exception:
+            pass
+        try:
+            dpg.maximize_viewport()
+        except Exception:
+            pass
+
+        self._setup_done = True
+
+    def start(self) -> None:
+        """Enter the Dear PyGui render loop until stopped."""
+        if not self._setup_done:
+            raise RuntimeError("ViewerApp.setup() must be called before start().")
+
+        dpg = _lazy_import_dpg()
+        while dpg.is_dearpygui_running():
+            if self.stop_event.is_set():
+                dpg.stop_dearpygui()
+                break
+            self.on_frame()
+            dpg.render_dearpygui_frame()
+
+    def teardown(self) -> None:
+        """Destroy the Dear PyGui context if this app created it."""
+        if not self._owns_context:
+            return
+
+        dpg = _lazy_import_dpg()
+        try:
+            dpg.destroy_context()
+        except Exception:
+            pass
+        finally:
+            self._owns_context = False
+            self._setup_done = False
+
 
 def run_gui(shared_state, stop_event) -> None:
-    """Run the Dear PyGui viewer event loop until closed.
-
-    This function blocks until the user closes the window.
-    """
-    dpg = _lazy_import_dpg()
-    dpg.create_context()
-    dpg.create_viewport(title="ROI Stream Viewer", width=1000, height=650)
-
+    """Convenience wrapper that sets up, starts, and tears down the GUI."""
     app = ViewerApp(shared_state, stop_event)
-    app.build_ui()
-
-    dpg.setup_dearpygui()
-    dpg.show_viewport()
-    # Ensure closing the viewport cleanly signals the worker to stop (HDF5 finalize)
+    app.setup()
     try:
-        dpg.set_exit_callback(lambda: stop_event.set())
-    except Exception:
-        pass
-    try:
-        dpg.maximize_viewport()
-    except Exception:
-        pass
-
-    while dpg.is_dearpygui_running():
-        if stop_event.is_set():
-            # Worker requested stop; close GUI too
-            dpg.stop_dearpygui()
-            break
-        app.on_frame()
-        dpg.render_dearpygui_frame()
-
-    dpg.destroy_context()
+        app.start()
+    finally:
+        app.teardown()
