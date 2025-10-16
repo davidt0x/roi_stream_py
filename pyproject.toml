@@ -12,6 +12,7 @@ dependencies = [
     "opencv-python>=4.8.0",
     "h5py>=3.9.0",
     "imgui-bundle>=1.92.4",
+    "rich>=13.7",
 ]
 
 [build-system]

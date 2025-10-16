@@ -47,6 +47,7 @@ def run_stream(
         raise RuntimeError("No frames received from source")
 
     f16_0 = to_uint16_gray(frame0)
+    preview8_0 = np.right_shift(f16_0, 8).astype(np.uint8, copy=False)
     H, W = f16_0.shape
 
     # If ROI file included a source resolution and it differs, scale coordinates
@@ -107,7 +108,7 @@ def run_stream(
     pending_means.append(means0)
     if shared is not None:
         shared.traces.append(t, means0)
-        shared.update_frame(f16_0, (W, H))
+        shared.update_frame(f16_0, (W, H), preview8=preview8_0)
 
     # Main loop
     try:
@@ -118,6 +119,7 @@ def run_stream(
             if not ok or frame is None:
                 break
             f16 = to_uint16_gray(frame)
+            preview8 = np.right_shift(f16, 8).astype(np.uint8, copy=False)
             means = roi.compute_means(f16)
 
             t = time.perf_counter() - tic0
@@ -130,7 +132,7 @@ def run_stream(
             pending_means.append(means)
             if shared is not None:
                 shared.traces.append(t, means)
-                shared.update_frame(f16, (W, H))
+                shared.update_frame(f16, (W, H), preview8=preview8)
 
             # Flush chunk
             if len(pending_t) >= opts.frames_per_chunk:

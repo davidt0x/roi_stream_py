@@ -2,8 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import List, Tuple
+import cv2
 import numpy as np
 
+_LUT_GRAY_TO_16 = (np.arange(256, dtype=np.uint16) * 257).reshape(-1, 1)
+_LUT_B = np.round(np.arange(256, dtype=np.float32) * 0.1140209043 * 257.0).astype(np.uint16).reshape(-1, 1)
+_LUT_G = np.round(np.arange(256, dtype=np.float32) * 0.5870430745 * 257.0).astype(np.uint16).reshape(-1, 1)
+_LUT_R = np.round(np.arange(256, dtype=np.float32) * 0.2989360213 * 257.0).astype(np.uint16).reshape(-1, 1)
 
 def to_uint16_gray(frame: np.ndarray) -> np.ndarray:
     """Convert an image (uint8/uint16/float, gray or BGR) to uint16 grayscale [0..65535].
@@ -14,45 +19,42 @@ def to_uint16_gray(frame: np.ndarray) -> np.ndarray:
     if frame is None:
         raise ValueError("frame is None")
 
-    arr = frame
+    arr = np.asarray(frame)
     if arr.ndim == 3:
         # Color (assume BGR)
-        b = arr[..., 0].astype(np.float64, copy=False)
-        g = arr[..., 1].astype(np.float64, copy=False)
-        r = arr[..., 2].astype(np.float64, copy=False)
-
-        # Luma approximation: Y ≈ 0.299 R + 0.587 G + 0.114 B
-        y = 0.2989360213 * r + 0.5870430745 * g + 0.1140209043 * b
-
         if arr.dtype == np.uint8:
-            out = np.round(y * 257.0)
-        elif arr.dtype == np.uint16:
-            out = np.clip(np.round(y), 0.0, 65535.0)
-        else:
-            mx = float(np.nanmax(np.abs(arr))) if arr.size else 0.0
-            if mx <= 1.0:
-                out = np.round(np.clip(y, 0.0, 1.0) * 65535.0)
-            elif mx <= 255.0:
-                out = np.round(np.clip(y, 0.0, 255.0) * 257.0)
-            else:
-                out = np.clip(np.round(y), 0.0, 65535.0)
-        return out.astype(np.uint16, copy=False)
+            b = cv2.LUT(arr[..., 0], _LUT_B)
+            g = cv2.LUT(arr[..., 1], _LUT_G)
+            r = cv2.LUT(arr[..., 2], _LUT_R)
+            total = b.astype(np.uint32, copy=False)
+            total += g.astype(np.uint32, copy=False)
+            total += r.astype(np.uint32, copy=False)
+            return total.astype(np.uint16, copy=False)
+        if arr.dtype == np.uint16:
+            return cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
+
+        # Fallback for float or other integer types
+        # Use float32 to limit conversion cost
+        bgr = arr.astype(np.float32, copy=False)
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        return to_uint16_gray(gray)
 
     # Single-channel
     if arr.dtype == np.uint16:
         return arr
     if arr.dtype == np.uint8:
-        return (arr.astype(np.uint16) * 257)
+        return cv2.LUT(arr, _LUT_GRAY_TO_16)
 
     # Float / other integer types
-    y = arr.astype(np.float64, copy=False)
-    mx = float(np.nanmax(np.abs(y))) if y.size else 0.0
+    y = arr.astype(np.float32, copy=False)
+    mx = float(np.max(np.abs(y))) if y.size else 0.0
     if mx <= 1.0:
-        out = np.round(np.clip(y, 0.0, 1.0) * 65535.0)
+        out = np.clip(y, 0.0, 1.0) * 65535.0
     elif mx <= 255.0:
-        out = np.round(np.clip(y, 0.0, 255.0) * 257.0)
+        out = np.clip(y, 0.0, 255.0) * 257.0
     else:
-        out = np.clip(np.round(y), 0.0, 65535.0)
+        out = np.clip(y, 0.0, 65535.0)
+    np.rint(out, out=out)
     return out.astype(np.uint16, copy=False)
 
 
@@ -108,4 +110,3 @@ class CirclesROI:
             s = float(f[idx].mean(dtype=np.float64))
             means[k] = np.float32(s)
         return means
-
