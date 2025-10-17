@@ -1,16 +1,27 @@
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
 import colorsys
 import math
 import os
 import time
+from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
-from imgui_bundle import ImVec2, ImVec4, hello_imgui, imgui, implot, immvision
+from importlib import import_module
+from imgui_bundle import ImVec2, ImVec4, hello_imgui, immvision
+from imgui_bundle import imgui as _imgui_ns, implot as _implot_ns
+
+imgui = _imgui_ns
+if not hasattr(imgui, "WindowFlags_"):
+    imgui = import_module("imgui_bundle._imgui_bundle.imgui")
+
+implot = _implot_ns
+if not hasattr(implot, "begin_plot"):
+    implot = import_module("imgui_bundle._imgui_bundle.implot")
 
 from .perf import PerfTracker
+
 
 class ViewerApp:
     """imgui-bundle viewer for ROI mean traces and preview frames."""
@@ -81,6 +92,7 @@ class ViewerApp:
             except ValueError:
                 pass
         self._last_frame_present = 0.0
+        self.fullscreen_window = True
 
     def _estimate_window_point_cap(self, total_samples: int, tlast: float) -> int:
         """Estimate how many samples to request per window to bound copy cost."""
@@ -378,16 +390,25 @@ class ViewerApp:
 
     def render_gui(self) -> None:
         with self._perf.measure("render_gui"):
-            viewport = imgui.get_main_viewport()
+            viewport = None
+            get_main_viewport = getattr(imgui, "get_main_viewport", None)
+            if callable(get_main_viewport):
+                try:
+                    viewport = get_main_viewport()
+                except Exception:
+                    viewport = None
             if viewport is not None:
                 pos = viewport.pos
                 size = viewport.size
                 self._vp_w = size.x
                 self._vp_h = size.y
-                imgui.set_next_window_pos(pos, cond=imgui.Cond_.always)
-                imgui.set_next_window_size(size, cond=imgui.Cond_.always)
+                if self.fullscreen_window:
+                    imgui.set_next_window_pos(pos, cond=imgui.Cond_.always)
+                    imgui.set_next_window_size(size, cond=imgui.Cond_.always)
 
-            flags = imgui.WindowFlags_.no_resize | imgui.WindowFlags_.no_move | imgui.WindowFlags_.no_collapse
+            flags = imgui.WindowFlags_.no_collapse
+            if self.fullscreen_window:
+                flags |= imgui.WindowFlags_.no_resize | imgui.WindowFlags_.no_move
             if not imgui.begin(self.window_title, flags=flags):
                 imgui.end()
                 return

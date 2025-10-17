@@ -221,3 +221,6 @@ __marimo__/
 
 # Dear IMGUI config file
 ROI_Stream_Viewer.ini
+ROI_Stream_Viewer__ImGui_Tests_.ini
+Demo_ImGui_Test_Engine.ini
+imgui_test_example.py
