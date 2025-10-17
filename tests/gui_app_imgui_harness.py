@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import math
 import threading
+import inspect
 from dataclasses import dataclass, field
-from typing import Any, Callable, List, Optional, Tuple
+from importlib import import_module
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import traceback
-from importlib import import_module
 from imgui_bundle import ImVec2, hello_imgui, imgui as _imgui_ns
 from imgui_bundle.imgui.test_engine_checks import CHECK
 
@@ -26,6 +27,19 @@ if not hasattr(imgui, "WindowFlags_"):
     imgui = import_module("imgui_bundle._imgui_bundle.imgui")
 
 
+__all__ = [
+    "STATUS_FAILED",
+    "STATUS_PASSED",
+    "ViewerTestSuite",
+    "create_viewer_test_suite",
+    "imgui_case",
+    "register_imgui_case_module",
+    "list_scripted_test_labels",
+    "registered_cases",
+    "run_imgui_test_engine",
+]
+
+
 STATUS_READY = "ready"
 STATUS_QUEUED = "queued"
 STATUS_RUNNING = "running"
@@ -33,6 +47,9 @@ STATUS_PASSED = "passed"
 STATUS_FAILED = "failed"
 
 _SCRIPTED_CATEGORY = "ViewerApp"
+_DEFAULT_CASE_MODULES = ["tests.gui_app_imgui_cases"]
+_TEST_REGISTRY: Dict[str, "RegisteredCase"] = {}
+_CASES_LOADED = False
 
 
 @dataclass
@@ -45,6 +62,83 @@ class ScriptedTestEntry:
     error: str = ""
     done: threading.Event = field(default_factory=threading.Event)
     requires_exit: bool = False
+    case: Optional["RegisteredCase"] = None
+
+
+@dataclass
+class RegisteredCase:
+    key: str
+    name: str
+    func: Callable[[imgui.test_engine.TestContext, ViewerApp], None]
+    requires_exit: bool = False
+    auto_set_ref: bool = True
+
+    @property
+    def label(self) -> str:
+        return _make_label(_SCRIPTED_CATEGORY, self.name)
+
+
+def imgui_case(
+    *,
+    name: Optional[str] = None,
+    requires_exit: bool = False,
+    auto_set_ref: bool = True,
+) -> Callable[[Callable[[imgui.test_engine.TestContext, ViewerApp], None]], Callable[[imgui.test_engine.TestContext, ViewerApp], None]]:
+    def decorator(func: Callable[[imgui.test_engine.TestContext, ViewerApp], None]) -> Callable[[imgui.test_engine.TestContext, ViewerApp], None]:
+        if not func.__name__.startswith("test_"):
+            raise ValueError("ImGui case functions must start with 'test_' to integrate with pytest")
+        params = inspect.signature(func).parameters
+        if len(params) != 2:
+            raise ValueError("ImGui case functions must accept exactly two parameters: (ctx, app)")
+
+        def wrapped(ctx: imgui.test_engine.TestContext, app: ViewerApp) -> None:
+            if auto_set_ref:
+                ctx.set_ref(app.window_title)
+            func(ctx, app)
+
+        display_name = name or func.__name__[len("test_") :].replace("_", " ").title()
+        key = func.__name__
+        if key in _TEST_REGISTRY:
+            raise ValueError(f"Duplicate ImGui test case registered: {key}")
+        _TEST_REGISTRY[key] = RegisteredCase(
+            key=key,
+            name=display_name,
+            func=wrapped if auto_set_ref else func,
+            requires_exit=requires_exit,
+            auto_set_ref=auto_set_ref,
+        )
+        return wrapped if auto_set_ref else func
+
+    return decorator
+
+
+def _ensure_cases_loaded() -> None:
+    global _CASES_LOADED
+    if _CASES_LOADED:
+        return
+    for module_name in _DEFAULT_CASE_MODULES:
+        try:
+            import_module(module_name)
+        except Exception:
+            continue
+    _CASES_LOADED = True
+
+
+def registered_cases(*, include_requires_exit: bool = True) -> Iterable[RegisteredCase]:
+    _ensure_cases_loaded()
+    cases = sorted(_TEST_REGISTRY.values(), key=lambda c: c.label)
+    for case in cases:
+        if not include_requires_exit and case.requires_exit:
+            continue
+        yield case
+
+
+def register_imgui_case_module(module_name: str) -> None:
+    if module_name in _DEFAULT_CASE_MODULES:
+        return
+    _DEFAULT_CASE_MODULES.append(module_name)
+    if _CASES_LOADED:
+        import_module(module_name)
 
 
 def _make_label(category: str, name: str) -> str:
@@ -82,60 +176,14 @@ def _queue_tests(entries: List[ScriptedTestEntry]) -> None:
         imgui.test_engine.queue_test(engine, entry.test)
 
 
-def _check_ui(condition: bool, message: str) -> None:
+def check_ui(condition: bool, message: str) -> None:
     CHECK(condition)
     if not condition:
         raise AssertionError(message)
 
 
-def _build_control_row_test(app: ViewerApp) -> Callable[[imgui.test_engine.TestContext], None]:
-    def test_controls_func(ctx: imgui.test_engine.TestContext) -> None:
-        ctx.set_ref(app.window_title)
-        ctx.item_input_value("X window (s)", 20.0)
-        _check_ui(
-            math.isclose(app.window_sec, 20.0, rel_tol=1e-3, abs_tol=1e-3),
-            "Window range did not update",
-        )
-        ctx.item_click("Single Plot")
-        _check_ui(app.display_mode == "Overlay", "Single Plot toggle failed")
-        ctx.item_click("Single Plot")
-        _check_ui(app.display_mode == "Stacked", "Single Plot toggle did not revert")
-
-        ctx.item_click("Lock global Y")
-        _check_ui(app.lock_global_y is True, "Lock global Y did not enable")
-        ctx.item_click("Lock global Y")
-        _check_ui(app.lock_global_y is False, "Lock global Y did not disable")
-
-    return test_controls_func
-
-
-def _build_preview_test(app: ViewerApp) -> Callable[[imgui.test_engine.TestContext], None]:
-    def test_preview_func(ctx: imgui.test_engine.TestContext) -> None:
-        ctx.set_ref(app.window_title)
-        ctx.item_open("Preview")
-        ctx.item_input_value("Preview height (fraction)", 0.55)
-        _check_ui(
-            math.isclose(app.preview_frac, 0.55, rel_tol=0.0, abs_tol=1e-2),
-            "Preview slider did not update",
-        )
-
-    return test_preview_func
-
-
-
-_SCRIPTED_TEST_BUILDERS: List[Tuple[str, bool, Callable[[ViewerApp], Callable[[imgui.test_engine.TestContext], None]]]] = [
-    ("Control Row Toggles", False, _build_control_row_test),
-    ("Preview Controls", False, _build_preview_test),
-]
-
-
 def list_scripted_test_labels(*, include_requires_exit: bool = True) -> List[str]:
-    labels: List[str] = []
-    for name, requires_exit, _ in _SCRIPTED_TEST_BUILDERS:
-        if not include_requires_exit and requires_exit:
-            continue
-        labels.append(_make_label(_SCRIPTED_CATEGORY, name))
-    return labels
+    return [case.label for case in registered_cases(include_requires_exit=include_requires_exit)]
 
 
 def build_sample_shared_state() -> Tuple[SharedState, threading.Event]:
@@ -186,19 +234,28 @@ def register_viewer_tests(
 
     entries: List[ScriptedTestEntry] = []
 
-    for name, requires_exit, builder in _SCRIPTED_TEST_BUILDERS:
-        if requires_exit and not request_exit:
-            continue
-        test = imgui.test_engine.register_test(engine, _SCRIPTED_CATEGORY, name)
+    _ensure_cases_loaded()
+    if not _TEST_REGISTRY:
+        raise RuntimeError("No ImGui test cases registered")
+
+    for case in registered_cases(include_requires_exit=request_exit):
+        test = imgui.test_engine.register_test(engine, _SCRIPTED_CATEGORY, case.name)
         entry = ScriptedTestEntry(
             test=test,
             category=_SCRIPTED_CATEGORY,
-            name=name,
-            label=_make_label(_SCRIPTED_CATEGORY, name),
-            requires_exit=requires_exit,
+            name=case.name,
+            label=case.label,
+            requires_exit=case.requires_exit,
+            case=case,
         )
-        test_func = builder(app)
-        test.test_func = _wrap_test(entry, test_func)
+
+        def make_func(case: RegisteredCase) -> Callable[[imgui.test_engine.TestContext], None]:
+            def _run(ctx: imgui.test_engine.TestContext) -> None:
+                case.func(ctx, app)
+
+            return _run
+
+        test.test_func = _wrap_test(entry, make_func(case))
         entry.done.set()
         entries.append(entry)
 
@@ -367,8 +424,17 @@ def run_imgui_test_engine(
 
 def main() -> None:
     """Launch the viewer with tests registered but not auto-queued."""
+    _ensure_cases_loaded()
     run_imgui_test_engine(auto_queue=False, request_exit=False, show_test_engine=True)
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    from importlib import import_module
+    from pathlib import Path
+
+    project_root = Path(__file__).resolve().parent.parent
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+
+    import_module("tests.gui_app_imgui_harness").main()

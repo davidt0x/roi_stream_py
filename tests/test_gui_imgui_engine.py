@@ -12,14 +12,14 @@ except Exception:  # pragma: no cover
 if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
     pytest.skip("No DISPLAY available for imgui_bundle", allow_module_level=True)
 
-from tests.gui_app_imgui_harness import list_scripted_test_labels
+from tests.gui_app_imgui_harness import registered_cases
 
 
-SCRIPTED_TEST_LABELS = list_scripted_test_labels(include_requires_exit=False)
+SCRIPTED_CASES = list(registered_cases(include_requires_exit=False))
 
 
 @pytest.mark.gui
-@pytest.mark.parametrize("entry_label", SCRIPTED_TEST_LABELS)
-def test_imgui_scripted_entry(imgui_test_suite, entry_label: str):
-    entry = imgui_test_suite.find_entry(entry_label)
+@pytest.mark.parametrize("case", SCRIPTED_CASES, ids=lambda case: case.label)
+def test_imgui_scripted_entry(imgui_test_suite, case):
+    entry = imgui_test_suite.find_entry(case.label)
     imgui_test_suite.run_entry(entry)
