@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import math
 import threading
-from dataclasses import dataclass
-from typing import Any, List, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Callable, List, Optional, Tuple
 
 import numpy as np
 import traceback
@@ -32,12 +32,19 @@ STATUS_RUNNING = "running"
 STATUS_PASSED = "passed"
 STATUS_FAILED = "failed"
 
+_SCRIPTED_CATEGORY = "ViewerApp"
+
+
 @dataclass
 class ScriptedTestEntry:
     test: Any
+    category: str
+    name: str
     label: str
     status: str = STATUS_READY
     error: str = ""
+    done: threading.Event = field(default_factory=threading.Event)
+    requires_exit: bool = False
 
 
 def _make_label(category: str, name: str) -> str:
@@ -53,9 +60,10 @@ def _wrap_test(entry: ScriptedTestEntry, func):
         except Exception:
             entry.status = STATUS_FAILED
             entry.error = traceback.format_exc(limit=6)
-            raise
         else:
             entry.status = STATUS_PASSED
+        finally:
+            entry.done.set()
 
     return wrapped
 
@@ -67,9 +75,67 @@ def _queue_tests(entries: List[ScriptedTestEntry]) -> None:
     engine_io = imgui.test_engine.get_io(engine)
     engine_io.config_run_speed = imgui.test_engine.TestRunSpeed.fast
     for entry in entries:
+        entry.error = ""
+        entry.done.clear()
         entry.status = STATUS_QUEUED
         entry.error = ""
         imgui.test_engine.queue_test(engine, entry.test)
+
+
+def _check_ui(condition: bool, message: str) -> None:
+    CHECK(condition)
+    if not condition:
+        raise AssertionError(message)
+
+
+def _build_control_row_test(app: ViewerApp) -> Callable[[imgui.test_engine.TestContext], None]:
+    def test_controls_func(ctx: imgui.test_engine.TestContext) -> None:
+        ctx.set_ref(app.window_title)
+        ctx.item_input_value("X window (s)", 20.0)
+        _check_ui(
+            math.isclose(app.window_sec, 20.0, rel_tol=1e-3, abs_tol=1e-3),
+            "Window range did not update",
+        )
+        ctx.item_click("Single Plot")
+        _check_ui(app.display_mode == "Overlay", "Single Plot toggle failed")
+        ctx.item_click("Single Plot")
+        _check_ui(app.display_mode == "Stacked", "Single Plot toggle did not revert")
+
+        ctx.item_click("Lock global Y")
+        _check_ui(app.lock_global_y is True, "Lock global Y did not enable")
+        ctx.item_click("Lock global Y")
+        _check_ui(app.lock_global_y is False, "Lock global Y did not disable")
+
+    return test_controls_func
+
+
+def _build_preview_test(app: ViewerApp) -> Callable[[imgui.test_engine.TestContext], None]:
+    def test_preview_func(ctx: imgui.test_engine.TestContext) -> None:
+        ctx.set_ref(app.window_title)
+        ctx.item_open("Preview")
+        ctx.item_input_value("Preview height (fraction)", 0.55)
+        _check_ui(
+            math.isclose(app.preview_frac, 0.55, rel_tol=0.0, abs_tol=1e-2),
+            "Preview slider did not update",
+        )
+
+    return test_preview_func
+
+
+
+_SCRIPTED_TEST_BUILDERS: List[Tuple[str, bool, Callable[[ViewerApp], Callable[[imgui.test_engine.TestContext], None]]]] = [
+    ("Control Row Toggles", False, _build_control_row_test),
+    ("Preview Controls", False, _build_preview_test),
+]
+
+
+def list_scripted_test_labels(*, include_requires_exit: bool = True) -> List[str]:
+    labels: List[str] = []
+    for name, requires_exit, _ in _SCRIPTED_TEST_BUILDERS:
+        if not include_requires_exit and requires_exit:
+            continue
+        labels.append(_make_label(_SCRIPTED_CATEGORY, name))
+    return labels
 
 
 def build_sample_shared_state() -> Tuple[SharedState, threading.Event]:
@@ -120,50 +186,21 @@ def register_viewer_tests(
 
     entries: List[ScriptedTestEntry] = []
 
-    category = "ViewerApp"
-
-    test_controls = imgui.test_engine.register_test(engine, category, "Control Row Toggles")
-
-    def test_controls_func(ctx: imgui.test_engine.TestContext) -> None:
-        ctx.set_ref(app.window_title)
-        ctx.item_input_value("X window (s)", 20.0)
-        CHECK(math.isclose(app.window_sec, 20.0, rel_tol=1e-3, abs_tol=1e-3))
-
-        ctx.item_click("Single Plot")
-        CHECK(app.display_mode == "Overlay")
-        ctx.item_click("Single Plot")
-        CHECK(app.display_mode == "Stacked")
-
-        ctx.item_click("Lock global Y")
-        CHECK(app.lock_global_y is True)
-        ctx.item_click("Lock global Y")
-        CHECK(app.lock_global_y is False)
-
-    entry_controls = ScriptedTestEntry(test_controls, _make_label(category, "Control Row Toggles"))
-    test_controls.test_func = _wrap_test(entry_controls, test_controls_func)
-    entries.append(entry_controls)
-
-    test_preview = imgui.test_engine.register_test(engine, category, "Preview Controls")
-
-    def test_preview_func(ctx: imgui.test_engine.TestContext) -> None:
-        ctx.set_ref(app.window_title)
-        ctx.item_open("Preview")
-        ctx.item_input_value("Preview height (fraction)", 0.55)
-        CHECK(math.isclose(app.preview_frac, 0.55, rel_tol=0.0, abs_tol=1e-2))
-
-    entry_preview = ScriptedTestEntry(test_preview, _make_label(category, "Preview Controls"))
-    test_preview.test_func = _wrap_test(entry_preview, test_preview_func)
-    entries.append(entry_preview)
-
-    test_shutdown = imgui.test_engine.register_test(engine, category, "Shutdown")
-
-    def test_shutdown_func(ctx: imgui.test_engine.TestContext) -> None:
-        if request_exit:
-            app.stop_event.set()
-
-    entry_shutdown = ScriptedTestEntry(test_shutdown, _make_label(category, "Shutdown"))
-    test_shutdown.test_func = _wrap_test(entry_shutdown, test_shutdown_func)
-    entries.append(entry_shutdown)
+    for name, requires_exit, builder in _SCRIPTED_TEST_BUILDERS:
+        if requires_exit and not request_exit:
+            continue
+        test = imgui.test_engine.register_test(engine, _SCRIPTED_CATEGORY, name)
+        entry = ScriptedTestEntry(
+            test=test,
+            category=_SCRIPTED_CATEGORY,
+            name=name,
+            label=_make_label(_SCRIPTED_CATEGORY, name),
+            requires_exit=requires_exit,
+        )
+        test_func = builder(app)
+        test.test_func = _wrap_test(entry, test_func)
+        entry.done.set()
+        entries.append(entry)
 
     if auto_queue:
         _queue_tests(entries)
@@ -171,14 +208,68 @@ def register_viewer_tests(
     return entries
 
 
-def run_imgui_test_engine(
-    window_title: str = "ROI Stream Viewer (ImGui Tests)",
-    *,
-    auto_queue: bool = True,
-    request_exit: bool = True,
-) -> bool:
-    """Boot the viewer with scripted tests registered and optionally queued."""
+@dataclass
+class ViewerTestSuite:
+    app: ViewerApp
+    stop_event: threading.Event
+    runner_params: hello_imgui.RunnerParams
+    entries: List[ScriptedTestEntry]
+    show_test_engine: bool
+    registered: threading.Event = field(default_factory=threading.Event)
+    _thread: Optional[threading.Thread] = None
 
+    def start(self, timeout: float = 5.0) -> None:
+        if self._thread is not None:
+            return
+
+        def _run_app() -> None:
+            try:
+                hello_imgui.run(self.runner_params)
+            finally:
+                self.app.teardown()
+
+        self._thread = threading.Thread(target=_run_app, name="imgui-test-engine", daemon=True)
+        self._thread.start()
+        if not self.registered.wait(timeout):
+            raise RuntimeError("ImGui test registration timed out")
+
+    def stop(self, timeout: float = 5.0) -> None:
+        self.stop_event.set()
+        params = self.runner_params
+        if params is not None:
+            params.app_shall_exit = True
+        if self._thread is not None:
+            self._thread.join(timeout)
+            self._thread = None
+
+    def find_entry(self, label: str) -> ScriptedTestEntry:
+        for entry in self.entries:
+            if entry.label == label:
+                return entry
+        raise KeyError(label)
+
+    def run_entry(self, entry: ScriptedTestEntry, timeout: float = 10.0) -> None:
+        engine = hello_imgui.get_imgui_test_engine()
+        if engine is None:
+            raise RuntimeError("ImGui test engine is not available")
+        entry.error = ""
+        entry.status = STATUS_READY
+        entry.done.clear()
+        entry.status = STATUS_QUEUED
+        imgui.test_engine.queue_test(engine, entry.test)
+        if not entry.done.wait(timeout):
+            raise TimeoutError(f"ImGui test '{entry.label}' timed out")
+        if entry.status != STATUS_PASSED:
+            raise AssertionError(entry.error or f"ImGui test '{entry.label}' failed")
+
+
+def create_viewer_test_suite(
+    *,
+    window_title: str = "ROI Stream Viewer (ImGui Tests)",
+    auto_queue: bool = False,
+    request_exit: bool = True,
+    show_test_engine: bool = False,
+) -> ViewerTestSuite:
     shared, stop_event = build_sample_shared_state()
     app = ViewerApp(shared, stop_event, window_title=window_title)
     app.setup(width=960, height=620)
@@ -189,39 +280,52 @@ def run_imgui_test_engine(
         raise RuntimeError("ViewerApp.setup() did not initialize runner parameters.")
 
     runner_params.use_imgui_test_engine = True
+    runner_params.app_window_params.hidden = not show_test_engine
+
+    suite = ViewerTestSuite(
+        app=app,
+        stop_event=stop_event,
+        runner_params=runner_params,
+        entries=[],
+        show_test_engine=show_test_engine,
+    )
 
     def register_tests() -> None:
-        register_viewer_tests(app, auto_queue=auto_queue, request_exit=request_exit)
+        suite.entries = register_viewer_tests(app, auto_queue=auto_queue, request_exit=request_exit)
+        suite.registered.set()
 
     runner_params.callbacks.register_tests = register_tests
+    _install_show_gui_callback(suite)
+    return suite
 
-    callbacks = runner_params.callbacks
+
+def _install_show_gui_callback(suite: ViewerTestSuite) -> None:
+    callbacks = suite.runner_params.callbacks
     original_show_gui = callbacks.show_gui
+
+    if not suite.show_test_engine:
+        return
 
     def show_gui_with_test_engine() -> None:
         engine = hello_imgui.get_imgui_test_engine()
         viewport = imgui.get_main_viewport()
 
         left_width = 0.0
-        if viewport is not None:
+        if viewport is not None and engine is not None:
             pos = viewport.pos
             size = viewport.size
-            if engine is not None:
-                left_width = min(max(320.0, size.x * 0.3), max(380.0, size.x * 0.45))
-                left_width = min(left_width, max(0.0, size.x - 320.0))
-            else:
-                left_width = 0.0
-            if engine is not None and left_width > 0.0:
-                imgui.set_next_window_pos(ImVec2(pos.x, pos.y), cond=imgui.Cond_.always)
-                imgui.set_next_window_size(ImVec2(left_width, size.y), cond=imgui.Cond_.always)
-                flags = (
-                    imgui.WindowFlags_.no_collapse
-                    | imgui.WindowFlags_.no_move
-                    | imgui.WindowFlags_.no_resize
-                )
-                if imgui.begin("Dear ImGui Test Engine", flags=flags):
-                    imgui.test_engine.show_test_engine_windows(engine, True)
-                imgui.end()
+            left_width = min(max(320.0, size.x * 0.3), max(380.0, size.x * 0.45))
+            left_width = min(left_width, max(0.0, size.x - 320.0))
+            imgui.set_next_window_pos(ImVec2(pos.x, pos.y), cond=imgui.Cond_.always)
+            imgui.set_next_window_size(ImVec2(left_width, size.y), cond=imgui.Cond_.always)
+            flags = (
+                imgui.WindowFlags_.no_collapse
+                | imgui.WindowFlags_.no_move
+                | imgui.WindowFlags_.no_resize
+            )
+            if imgui.begin("Dear ImGui Test Engine", flags=flags):
+                imgui.test_engine.show_test_engine_windows(engine, True)
+            imgui.end()
         elif engine is not None:
             imgui.test_engine.show_test_engine_windows(engine, True)
 
@@ -229,7 +333,8 @@ def run_imgui_test_engine(
             if viewport is not None:
                 pos = viewport.pos
                 size = viewport.size
-                viewer_width = max(320.0, size.x - left_width)
+                viewer_width = size.x - left_width if engine is not None else size.x
+                viewer_width = max(320.0, viewer_width)
                 viewer_pos_x = pos.x + left_width
                 imgui.set_next_window_pos(ImVec2(viewer_pos_x, pos.y), cond=imgui.Cond_.always)
                 imgui.set_next_window_size(ImVec2(viewer_width, size.y), cond=imgui.Cond_.always)
@@ -237,17 +342,32 @@ def run_imgui_test_engine(
 
     callbacks.show_gui = show_gui_with_test_engine
 
-    try:
-        hello_imgui.run(runner_params)
-    finally:
-        app.teardown()
 
-    return stop_event.is_set()
+def run_imgui_test_engine(
+    window_title: str = "ROI Stream Viewer (ImGui Tests)",
+    *,
+    auto_queue: bool = True,
+    request_exit: bool = True,
+    show_test_engine: bool = True,
+) -> bool:
+    """Boot the viewer with scripted tests registered and optionally queued."""
+    suite = create_viewer_test_suite(
+        window_title=window_title,
+        auto_queue=auto_queue,
+        request_exit=request_exit,
+        show_test_engine=show_test_engine,
+    )
+    try:
+        hello_imgui.run(suite.runner_params)
+    finally:
+        suite.app.teardown()
+
+    return suite.stop_event.is_set()
 
 
 def main() -> None:
     """Launch the viewer with tests registered but not auto-queued."""
-    run_imgui_test_engine(auto_queue=False, request_exit=False)
+    run_imgui_test_engine(auto_queue=False, request_exit=False, show_test_engine=True)
 
 
 if __name__ == "__main__":
