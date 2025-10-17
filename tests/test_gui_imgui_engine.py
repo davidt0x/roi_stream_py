@@ -12,7 +12,7 @@ except Exception:  # pragma: no cover
 if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
     pytest.skip("No DISPLAY available for imgui_bundle", allow_module_level=True)
 
-from tests.gui_app_imgui_harness import list_scripted_test_labels, run_imgui_test_engine
+from tests.gui_app_imgui_harness import list_scripted_test_labels
 
 
 SCRIPTED_TEST_LABELS = list_scripted_test_labels(include_requires_exit=False)
