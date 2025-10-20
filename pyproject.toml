@@ -37,3 +37,8 @@ markers = [
   "virtualcam: tests using local virtual camera at index 2",
   "gui: interactive viewer tests (skipped in CI)",
 ]
+
+[tool.coverage.run]
+source = ["roi_stream"]
+relative_files = true
+
