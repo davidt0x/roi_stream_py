@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import Iterable, List, Sequence, Tuple
 import cv2
 import numpy as np
 
@@ -58,31 +58,110 @@ def to_uint16_gray(frame: np.ndarray) -> np.ndarray:
     return out.astype(np.uint16, copy=False)
 
 
+@dataclass(frozen=True)
+class ROIShape:
+    """Immutable ROI shape described by an ellipse (circle is rx==ry)."""
+
+    cx: float
+    cy: float
+    rx: float
+    ry: float
+    angle_deg: float = 0.0
+
+    def as_array(self) -> np.ndarray:
+        arr = np.array(
+            [float(self.cx), float(self.cy), float(self.rx), float(self.ry), float(self.angle_deg)],
+            dtype=np.float64,
+        )
+        return arr
+
+    @staticmethod
+    def from_sequence(vals: Sequence[float]) -> "ROIShape":
+        if len(vals) == 3:
+            cx, cy, r = vals
+            return ROIShape(cx=float(cx), cy=float(cy), rx=float(r), ry=float(r), angle_deg=0.0)
+        if len(vals) == 5:
+            cx, cy, rx, ry, ang = vals
+            return ROIShape(cx=float(cx), cy=float(cy), rx=float(rx), ry=float(ry), angle_deg=float(ang))
+        raise ValueError("ROI sequences must have 3 (circle) or 5 (ellipse) values")
+
+
+def roi_table_from_iter(shapes: Iterable[ROIShape]) -> np.ndarray:
+    rows = [shape.as_array() for shape in shapes]
+    if not rows:
+        return np.zeros((0, 5), dtype=np.float64)
+    return np.vstack(rows)
+
+
+def normalize_roi_table(
+    data: Iterable[ROIShape] | Sequence[Sequence[float]] | np.ndarray,
+) -> np.ndarray:
+    """Return an array shaped (K,5) -> [cx, cy, rx, ry, angle_deg]."""
+    if isinstance(data, np.ndarray):
+        arr = np.asarray(data, dtype=float)
+        if arr.ndim != 2:
+            raise ValueError("ROI array must be 2D")
+        if arr.shape[1] == 5:
+            return arr.astype(np.float64, copy=False)
+        if arr.shape[1] == 3:
+            out = np.zeros((arr.shape[0], 5), dtype=np.float64)
+            out[:, 0:2] = arr[:, 0:2]
+            out[:, 2] = arr[:, 2]
+            out[:, 3] = arr[:, 2]
+            # angle stays zero
+            return out
+        raise ValueError("ROI array must have 3 (circle) or 5 (ellipse) columns")
+    # Iterable of shapes
+    try:
+        shapes = list(data)  # type: ignore[arg-type]
+    except TypeError:
+        raise ValueError("Unsupported ROI data type") from None
+    if not shapes:
+        return np.zeros((0, 5), dtype=np.float64)
+    if isinstance(shapes[0], ROIShape):
+        return roi_table_from_iter(shapes)  # type: ignore[arg-type]
+    # Otherwise convert sequences to ROIShape first
+    converted = [ROIShape.from_sequence(s) for s in shapes]  # type: ignore[arg-type]
+    return roi_table_from_iter(converted)
+
+
 @dataclass
-class CirclesROI:
+class ROISet:
     height: int
     width: int
-    circles: np.ndarray  # (K,3) floats [xc, yc, r]
+    table: np.ndarray  # (K,5) floats [cx, cy, rx, ry, angle_deg]
 
     def __post_init__(self) -> None:
-        if self.circles.ndim != 2 or self.circles.shape[1] != 3:
-            raise ValueError("circles must be (K,3) array")
-        self.K = int(self.circles.shape[0])
+        self.table = normalize_roi_table(self.table)
+        if self.table.ndim != 2 or self.table.shape[1] != 5:
+            raise ValueError("table must be a (K,5) array")
+        self.table = self.table.astype(np.float64, copy=False)
+        self.K = int(self.table.shape[0])
         self._build_indices()
 
     def _build_indices(self) -> None:
         H, W = int(self.height), int(self.width)
-        circles = self.circles.astype(np.float64, copy=False)
-        # Precompute per-ROI boolean masks and flattened indices
         yy = np.arange(H, dtype=np.float64)[:, None]
         xx = np.arange(W, dtype=np.float64)[None, :]
         self._indices: List[np.ndarray] = []
         self.npix: np.ndarray = np.zeros(self.K, dtype=np.uint32)
         for k in range(self.K):
-            xc, yc, r = circles[k]
-            # Clip radius and centers to reasonable bounds
-            r = max(0.0, float(r))
-            mask = (xx - float(xc)) ** 2 + (yy - float(yc)) ** 2 <= r ** 2
+            cx, cy, rx, ry, angle_deg = self.table[k]
+            rx = max(0.0, float(rx))
+            ry = max(0.0, float(ry))
+            if rx == 0.0 or ry == 0.0:
+                self._indices.append(np.empty(0, dtype=np.int64))
+                self.npix[k] = 0
+                continue
+            # Rotate coordinates around center by -angle
+            angle_rad = float(angle_deg) * np.pi / 180.0
+            cos_a = float(np.cos(angle_rad))
+            sin_a = float(np.sin(angle_rad))
+            dx = xx - float(cx)
+            dy = yy - float(cy)
+            xr = cos_a * dx + sin_a * dy
+            yr = -sin_a * dx + cos_a * dy
+            mask = (xr / rx) ** 2 + (yr / ry) ** 2 <= 1.0
             idx = np.flatnonzero(mask)
             self._indices.append(idx)
             self.npix[k] = np.uint32(idx.size)
@@ -110,3 +189,10 @@ class CirclesROI:
             s = float(f[idx].mean(dtype=np.float64))
             means[k] = np.float32(s)
         return means
+
+
+class CirclesROI(ROISet):
+    """Compatibility wrapper that accepts an Nx3 circle array."""
+
+    def __init__(self, height: int, width: int, circles: np.ndarray) -> None:
+        super().__init__(height=height, width=width, table=circles)

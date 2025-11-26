@@ -5,10 +5,10 @@ Quickstart
 - Install (with GUI extras optional):
   - `pip install -e .`
   - GUI: `pip install -e '.[gui]'`
-- Run headless on a video file:
-  - `roi_stream --source path/to/video.mp4 --rois examples/rois.csv --format 1280x720@60 --max-frames 300`
+- Run headless on a video file with a dedicated config:
+  - `roi_stream --config examples/sample_config.yaml --max-frames 300`
 - Launch with GUI (live traces):
-  - `roi_stream --source path/to/video.mp4 --rois examples/rois.csv --gui`
+  - `roi_stream --config examples/sample_config.yaml --gui`
 
 Device probing
 
@@ -23,13 +23,35 @@ WSL notes
 - Access to host webcams from Linux/WSL is generally unavailable.
 - Prefer file sources or run on native Windows Python when using webcams.
 
-ROI circles format
+ROI shapes format
 
-- CSV or JSON with rows `[xc, yc, r]` in pixels; origin at top-left.
-- Example: `examples/rois.csv`.
+- ROIs can be circles or ellipses. Internally each ROI is `[xc, yc, rx, ry, angle_deg]`.
+- Provide shapes via YAML. Names are optional; numbered indices are used when omitted.
+- Example YAML config with mixed shapes: `examples/sample_config.yaml`.
+
+YAML configuration
+
+- Define capture settings, stream options, and ROIs together.
+- Fields set via CLI flags override matching config values when provided explicitly.
+- Minimal structure:
+  ```yaml
+  source: "path/to/video.mp4"
+  format: 1280x720@60
+  stream:
+    frames_per_chunk: 240
+  rois:
+    shapes:
+      - type: circle
+        center: [640, 360]
+        radius: 120
+      - type: ellipse
+        center: [320, 220]
+        radii: [140, 60]
+        angle_deg: -20
+  ```
 
 Generate random ROIs
 
-- Create a CSV with 35 random circles for a given resolution (default 1280x720):
-  - `roi_stream_make_random_rois --width 1280 --height 720 --count 35 --out examples/rois_random.csv`
-- A sample file is included: `examples/rois_random.csv`.
+- Create a YAML file with 35 random circles for a given resolution (default 1280x720):
+  - `roi_stream_make_random_rois --width 1280 --height 720 --count 35 --out examples/rois_random.yaml`
+- A sample file is included: `examples/rois_random.yaml`.

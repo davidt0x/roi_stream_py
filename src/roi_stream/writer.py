@@ -8,6 +8,8 @@ import datetime as _dt
 import h5py
 import numpy as np
 
+from .roi import normalize_roi_table
+
 
 @dataclass
 class H5TracesWriter:
@@ -15,11 +17,12 @@ class H5TracesWriter:
     K: int
     chunk_frames: int = 240
 
-    def __init__(self, path: str | Path, circles: np.ndarray, meta: Dict[str, Any], chunk_frames: int = 240):
-        if circles is None or circles.ndim != 2 or circles.shape[1] != 3:
-            raise ValueError("circles must be Nx3 array")
+    def __init__(self, path: str | Path, rois: np.ndarray, meta: Dict[str, Any], chunk_frames: int = 240):
+        if rois is None:
+            raise ValueError("rois must not be None")
+        roi_table = normalize_roi_table(rois)
         self.path = Path(path)
-        self.K = int(circles.shape[0])
+        self.K = int(roi_table.shape[0])
         self.chunk_frames = max(1, int(chunk_frames))
         if self.path.exists():
             self.path.unlink()
@@ -33,7 +36,19 @@ class H5TracesWriter:
             '/roi/means', shape=(0, self.K), maxshape=(None, self.K), dtype='f4', chunks=(self.chunk_frames, self.K)
         )
         # Static datasets
-        self._f.create_dataset('/roi/circles', data=circles.astype(np.float64, copy=False), dtype='f8')
+        self._f.create_dataset('/roi/shapes', data=roi_table.astype(np.float64, copy=False), dtype='f8')
+        if self.K == 0:
+            circles_copy = np.empty((0, 3), dtype=np.float64)
+        else:
+            circles_copy = roi_table[:, :3]
+        is_circular = bool(
+            roi_table.size == 0
+            or (np.allclose(roi_table[:, 2], roi_table[:, 3]) and np.allclose(roi_table[:, 4], 0.0))
+        )
+        if is_circular:
+            self._f.create_dataset('/roi/circles', data=circles_copy.astype(np.float64, copy=False), dtype='f8')
+        else:
+            self._f['/roi'].attrs['circles_geometry'] = 'ellipse'
 
         # Root attributes
         meta = dict(meta or {})

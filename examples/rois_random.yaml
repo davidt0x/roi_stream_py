@@ -1,0 +1,180 @@
+rois:
+  shapes:
+  - name: 0
+    center:
+    - 150.0
+    - 90.0
+    radius: 22.0
+  - name: 1
+    center:
+    - 380.0
+    - 95.0
+    radius: 28.0
+  - name: 2
+    center:
+    - 610.0
+    - 100.0
+    radius: 18.0
+  - name: 3
+    center:
+    - 840.0
+    - 105.0
+    radius: 35.0
+  - name: 4
+    center:
+    - 1070.0
+    - 110.0
+    radius: 24.0
+  - name: 5
+    center:
+    - 170.0
+    - 170.0
+    radius: 30.0
+  - name: 6
+    center:
+    - 400.0
+    - 180.0
+    radius: 16.0
+  - name: 7
+    center:
+    - 630.0
+    - 190.0
+    radius: 40.0
+  - name: 8
+    center:
+    - 860.0
+    - 175.0
+    radius: 26.0
+  - name: 9
+    center:
+    - 1090.0
+    - 160.0
+    radius: 20.0
+  - name: 10
+    center:
+    - 140.0
+    - 250.0
+    radius: 32.0
+  - name: 11
+    center:
+    - 370.0
+    - 265.0
+    radius: 22.0
+  - name: 12
+    center:
+    - 600.0
+    - 240.0
+    radius: 36.0
+  - name: 13
+    center:
+    - 830.0
+    - 255.0
+    radius: 18.0
+  - name: 14
+    center:
+    - 1060.0
+    - 245.0
+    radius: 28.0
+  - name: 15
+    center:
+    - 180.0
+    - 330.0
+    radius: 24.0
+  - name: 16
+    center:
+    - 410.0
+    - 320.0
+    radius: 34.0
+  - name: 17
+    center:
+    - 640.0
+    - 335.0
+    radius: 20.0
+  - name: 18
+    center:
+    - 870.0
+    - 345.0
+    radius: 30.0
+  - name: 19
+    center:
+    - 1100.0
+    - 325.0
+    radius: 16.0
+  - name: 20
+    center:
+    - 155.0
+    - 410.0
+    radius: 38.0
+  - name: 21
+    center:
+    - 385.0
+    - 395.0
+    radius: 26.0
+  - name: 22
+    center:
+    - 615.0
+    - 405.0
+    radius: 22.0
+  - name: 23
+    center:
+    - 845.0
+    - 420.0
+    radius: 32.0
+  - name: 24
+    center:
+    - 1075.0
+    - 415.0
+    radius: 18.0
+  - name: 25
+    center:
+    - 165.0
+    - 490.0
+    radius: 28.0
+  - name: 26
+    center:
+    - 395.0
+    - 505.0
+    radius: 36.0
+  - name: 27
+    center:
+    - 625.0
+    - 485.0
+    radius: 24.0
+  - name: 28
+    center:
+    - 855.0
+    - 495.0
+    radius: 40.0
+  - name: 29
+    center:
+    - 1085.0
+    - 500.0
+    radius: 20.0
+  - name: 30
+    center:
+    - 145.0
+    - 570.0
+    radius: 30.0
+  - name: 31
+    center:
+    - 375.0
+    - 560.0
+    radius: 18.0
+  - name: 32
+    center:
+    - 605.0
+    - 575.0
+    radius: 26.0
+  - name: 33
+    center:
+    - 835.0
+    - 565.0
+    radius: 34.0
+  - name: 34
+    center:
+    - 1065.0
+    - 580.0
+    radius: 22.0
+  resolution:
+  - 1280
+  - 720

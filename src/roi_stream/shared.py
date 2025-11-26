@@ -131,7 +131,7 @@ class SharedState:
 
     traces: TraceRing
     resolution: Optional[Tuple[int, int]] = None  # (W, H)
-    circles: Optional[np.ndarray] = None  # (K, 3)
+    rois: Optional[np.ndarray] = None  # (K, 5)
 
     # Latest frame (uint16 grayscale). Access guarded by _frame_lock.
     _frame_lock: threading.Lock = field(default_factory=threading.Lock)

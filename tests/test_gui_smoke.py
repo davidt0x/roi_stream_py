@@ -26,11 +26,11 @@ def _make_shared_state(k: int = 3, n_samples: int = 200) -> SharedState:
         ring.append(t, vals)
     shared = SharedState(traces=ring)
     w, h = 320, 240
-    shared.circles = np.stack(
+    shared.rois = np.stack(
         [
-            [w * 0.25, h * 0.3, min(w, h) * 0.08],
-            [w * 0.50, h * 0.5, min(w, h) * 0.10],
-            [w * 0.75, h * 0.7, min(w, h) * 0.06],
+            [w * 0.25, h * 0.3, min(w, h) * 0.08, min(w, h) * 0.08, 0.0],
+            [w * 0.50, h * 0.5, min(w, h) * 0.10, min(w, h) * 0.06, 15.0],
+            [w * 0.75, h * 0.7, min(w, h) * 0.06, min(w, h) * 0.12, -20.0],
         ],
         axis=0,
     )

@@ -1,23 +1,42 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional, Tuple, Union
+from typing import Optional, Tuple, Union
 import time
 
 import numpy as np
 
 from .capture import FrameSource
 from .config import StreamOptions
-from .roi import CirclesROI, to_uint16_gray
+from .roi import ROISet, normalize_roi_table, to_uint16_gray
 from .writer import H5TracesWriter
 from .shared import SharedState
 import threading
 
 
+def _prepare_output_path(base: Path) -> Path:
+    """Return a writable path, appending a timestamp if the target exists."""
+    base = Path(base)
+    if not base.exists():
+        return base
+
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    stem = base.stem
+    suffix = base.suffix
+    candidate = base.with_name(f"{stem}_{ts}{suffix}")
+    if not candidate.exists():
+        return candidate
+
+    for idx in range(1, 1000):
+        candidate = base.with_name(f"{stem}_{ts}_{idx}{suffix}")
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(f"Unable to determine unique output path for {base}")
+
+
 def run_stream(
     source: Union[int, str],
-    circles: np.ndarray,
+    rois: np.ndarray,
     out_path: Optional[Union[str, Path]] = None,
     opts: Optional[StreamOptions] = None,
     format_tuple: Optional[Tuple[Optional[int], Optional[int], Optional[float]]] = None,
@@ -51,43 +70,46 @@ def run_stream(
     H, W = f16_0.shape
 
     # If ROI file included a source resolution and it differs, scale coordinates
-    circles_arr = np.asarray(circles, dtype=float)
+    roi_table = normalize_roi_table(rois)
     if roi_src_resolution is not None:
         roiW, roiH = int(roi_src_resolution[0]), int(roi_src_resolution[1])
         if roiW > 0 and roiH > 0 and (roiW != W or roiH != H):
             sx = W / float(roiW)
             sy = H / float(roiH)
-            s_iso = min(sx, sy)
-            circles_scaled = circles_arr.copy()
-            circles_scaled[:, 0] *= sx
-            circles_scaled[:, 1] *= sy
-            circles_scaled[:, 2] *= s_iso
-            # Optional clamp inside bounds
-            circles_scaled[:, 0] = np.clip(circles_scaled[:, 0], 0.0, W - 1.0)
-            circles_scaled[:, 1] = np.clip(circles_scaled[:, 1], 0.0, H - 1.0)
-            max_r = np.minimum.reduce([circles_scaled[:, 0], circles_scaled[:, 1], W - 1 - circles_scaled[:, 0], H - 1 - circles_scaled[:, 1]])
-            circles_scaled[:, 2] = np.maximum(0.0, np.minimum(circles_scaled[:, 2], max_r))
-            circles_arr = circles_scaled
+            rois_scaled = roi_table.copy()
+            rois_scaled[:, 0] *= sx
+            rois_scaled[:, 1] *= sy
+            rois_scaled[:, 2] *= abs(sx)
+            rois_scaled[:, 3] *= abs(sy)
+            rois_scaled[:, 0] = np.clip(rois_scaled[:, 0], 0.0, W - 1.0)
+            rois_scaled[:, 1] = np.clip(rois_scaled[:, 1], 0.0, H - 1.0)
+            rois_scaled[:, 2] = np.maximum(0.0, rois_scaled[:, 2])
+            rois_scaled[:, 3] = np.maximum(0.0, rois_scaled[:, 3])
+            roi_table = rois_scaled
             if (abs(sx - sy) > 1e-6):
                 print(f"[roi_stream] ROI file resolution {roiW}x{roiH} scaled to {W}x{H} (non-uniform: sx={sx:.3f}, sy={sy:.3f}).")
         
     # Build ROI masks for this resolution
-    roi = CirclesROI(height=H, width=W, circles=circles_arr)
+    roi = ROISet(height=H, width=W, table=roi_table)
     if shared is not None:
-        shared.circles = roi.circles
+        shared.rois = roi.table
         shared.resolution = (W, H)
 
     # HDF5 writer setup
     if out_path is None:
         ts = time.strftime("%Y%m%d_%H%M%S")
         out_path = Path.cwd() / f"traces_{ts}.h5"
-    out_path = Path(out_path)
+    desired_out = Path(out_path)
+    resolved_out = _prepare_output_path(desired_out)
+    if resolved_out != desired_out:
+        print(f"[roi_stream] Output exists; writing to {resolved_out}")
+    out_path = resolved_out
 
     meta = {
         'resolution': np.array([W, H], dtype=np.int32),
         'source': str(source),
     }
-    writer = H5TracesWriter(str(out_path), roi.circles, meta, chunk_frames=int(opts.frames_per_chunk))
+    writer = H5TracesWriter(str(out_path), roi.table, meta, chunk_frames=int(opts.frames_per_chunk))
 
     # Stats and buffers
     tic0 = time.perf_counter()

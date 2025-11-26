@@ -1,0 +1,12 @@
+rois:
+  shapes:
+  - name: 0
+    center:
+    - 200.0
+    - 150.0
+    radius: 25.0
+  - name: 1
+    center:
+    - 420.0
+    - 300.0
+    radius: 30.0

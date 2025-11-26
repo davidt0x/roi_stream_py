@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Optional, Tuple, Union
-import csv
-import json
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 import os
 import re
+
 import numpy as np
+import yaml
+
+from .roi import ROIShape, normalize_roi_table
 
 
 PathLike = Union[str, os.PathLike]
@@ -21,97 +23,196 @@ class StreamOptions:
     max_frames: int = 0  # 0 = unlimited
 
 
-def _parse_resolution_from_header(path: Path) -> Optional[Tuple[int, int]]:
-    """Parse an optional resolution hint from comment/header lines in a CSV.
+@dataclass
+class ROISettings:
+    table: np.ndarray
+    resolution: Optional[Tuple[int, int]] = None
+    labels: List[str] = field(default_factory=list)
 
-    Recognizes patterns like:
-      - "# resolution: 1280x720"
-      - "# resolution=1280x720"
-      - "# width=1280 height=720"
-      - "# 1280x720"
-    """
-    try:
-        with path.open("r", encoding="utf-8", errors="ignore") as f:
-            for _ in range(20):  # scan first few lines
-                pos = f.tell()
-                line = f.readline()
-                if not line:
-                    break
-                s = line.strip()
-                if not s:
-                    continue
-                if not s.startswith("#"):
-                    # stop at first non-comment line
-                    break
-                # search for WxH
-                m = re.search(r"(\d+)\s*[xX,]\s*(\d+)", s)
-                if m:
-                    w = int(m.group(1))
-                    h = int(m.group(2))
-                    if w > 0 and h > 0:
-                        return (w, h)
-                # search for width/height keywords
-                m2 = re.search(r"width\s*[=:]\s*(\d+).*height\s*[=:]\s*(\d+)", s, flags=re.IGNORECASE)
-                if m2:
-                    w = int(m2.group(1))
-                    h = int(m2.group(2))
-                    if w > 0 and h > 0:
-                        return (w, h)
-                # else continue
-    except Exception:
+
+@dataclass
+class RuntimeConfig:
+    source: Optional[Union[int, str]] = None
+    backend: Optional[str] = None
+    format: Optional[str] = None
+    output: Optional[str] = None
+    stream: StreamOptions = field(default_factory=StreamOptions)
+    rois: Optional[ROISettings] = None
+    extras: Dict[str, Any] = field(default_factory=dict)
+
+
+def _parse_resolution_hint(value: Any) -> Optional[Tuple[int, int]]:
+    if value is None:
         return None
-    return None
+    if isinstance(value, (list, tuple)) and len(value) == 2:
+        try:
+            w = int(value[0])
+            h = int(value[1])
+        except (TypeError, ValueError):
+            raise ValueError("resolution entries must be integers") from None
+        if w > 0 and h > 0:
+            return (w, h)
+        raise ValueError("resolution values must be positive")
+    raise ValueError("resolution must be a sequence of two numbers [width, height]")
 
 
-def load_circles_with_meta(path: PathLike) -> tuple[np.ndarray, Optional[Tuple[int, int]]]:
-    """Load ROI circles as an array of shape (K, 3) [xc, yc, r] floats.
+def _parse_roi_shapes_section(section: Any, base_dir: Path) -> ROISettings:
+    if not isinstance(section, dict):
+        raise ValueError("'rois' section must be a mapping")
 
-    Supports CSV (with or without header, lines starting with '#' ignored)
-    and JSON (list of [xc, yc, r]).
-    """
+    labels: list[str] = []
+    resolution_hint = None
+    table: Optional[np.ndarray] = None
+
+    if "file" in section:
+        roi_path = Path(section["file"])
+        if not roi_path.is_absolute():
+            roi_path = (base_dir / roi_path).resolve()
+        if roi_path.suffix.lower() in {".yaml", ".yml"}:
+            raise ValueError("rois.file cannot reference another YAML config; include shapes directly or use --config")
+        table, file_res = load_rois_with_meta(roi_path)
+        resolution_hint = file_res
+    elif "shapes" in section:
+        shapes_raw = section["shapes"]
+        if not isinstance(shapes_raw, Iterable):
+            raise ValueError("'rois.shapes' must be an iterable of ROI definitions")
+        shapes: list[ROIShape] = []
+        for idx, item in enumerate(shapes_raw):
+            if not isinstance(item, dict):
+                raise ValueError("Each ROI entry must be a mapping")
+            center = item.get("center") or item.get("xy") or item.get("origin")
+            if center is None:
+                raise ValueError("ROI entry missing 'center'")
+            if isinstance(center, dict):
+                try:
+                    cx = float(center["x"])
+                    cy = float(center["y"])
+                except KeyError as e:
+                    raise ValueError("ROI center dict must have 'x' and 'y'") from e
+            elif isinstance(center, (list, tuple)) and len(center) == 2:
+                cx = float(center[0])
+                cy = float(center[1])
+            else:
+                raise ValueError("ROI center must be [x, y] or {x:, y:}")
+
+            kind = str(item.get("type", "")).strip().lower()
+            radius = item.get("radius", item.get("r"))
+            radii = item.get("radii")
+            rx = item.get("rx")
+            ry = item.get("ry")
+
+            if kind == "circle":
+                if radius is None:
+                    raise ValueError("Circle ROI requires 'radius'")
+                rx_val = ry_val = float(radius)
+            else:
+                if radii is not None:
+                    if isinstance(radii, (list, tuple)) and len(radii) == 2:
+                        rx_val = float(radii[0])
+                        ry_val = float(radii[1])
+                    else:
+                        raise ValueError("'radii' must be [rx, ry]")
+                elif rx is not None and ry is not None:
+                    rx_val = float(rx)
+                    ry_val = float(ry)
+                elif radius is not None and kind in {"", "ellipse", "elliptical"}:
+                    rx_val = ry_val = float(radius)
+                else:
+                    raise ValueError("Ellipse ROI requires 'radii' or both 'rx' and 'ry'")
+            angle = item.get("angle_deg", item.get("angle", 0.0))
+            shape = ROIShape(cx=cx, cy=cy, rx=rx_val, ry=ry_val, angle_deg=float(angle))
+            shapes.append(shape)
+            label = item.get("name")
+            if label is None:
+                label = item.get("label")
+            if label is None:
+                label = idx
+            labels.append(str(label))
+        table = normalize_roi_table(shapes)
+    else:
+        raise ValueError("ROI config must provide either 'file' or 'shapes'")
+
+    if "resolution" in section:
+        resolution_hint = _parse_resolution_hint(section.get("resolution"))
+
+    if table is None:
+        raise ValueError("Failed to build ROI table from configuration")
+
+    return ROISettings(table=table, resolution=resolution_hint, labels=labels)
+
+
+def load_rois_with_meta(path: PathLike) -> tuple[np.ndarray, Optional[Tuple[int, int]]]:
+    """Load ROIs as an array of shape (K,5) [cx, cy, rx, ry, angle_deg]."""
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"ROI file not found: {p}")
 
-    ext = p.suffix.lower()
-    if ext in {".json", ".jsn"}:
-        data = json.loads(p.read_text())
-        arr = np.asarray(data, dtype=float)
-        src_res: Optional[Tuple[int, int]] = None
-    else:
-        # CSV or text: read rows of 3 floats, skipping comments/blank lines
-        src_res = _parse_resolution_from_header(p)
-        rows = []
-        with p.open("r", newline="") as f:
-            reader = csv.reader(f)
-            for row in reader:
-                if not row:
-                    continue
-                joined = "".join(row).strip()
-                if not joined or joined.startswith("#"):
-                    continue
-                try:
-                    vals = [float(x) for x in row[:3]]
-                except ValueError:
-                    # Maybe there is a header; skip lines that cannot parse
-                    continue
-                if len(vals) != 3:
-                    continue
-                rows.append(vals)
-        if not rows:
-            # Fallback: whitespace-delimited load
-            arr = np.loadtxt(str(p), dtype=float)
-        else:
-            arr = np.asarray(rows, dtype=float)
+    if p.suffix.lower() not in {".yaml", ".yml"}:
+        raise ValueError("ROI files must be YAML with either 'shapes' or 'rois' sections")
 
-    if arr.ndim != 2 or arr.shape[1] != 3:
-        raise ValueError("ROI circles must be an Nx3 array of [xc, yc, r]")
-    return arr, src_res
+    data = yaml.safe_load(p.read_text()) or {}
+
+    def _build(section: Dict[str, Any]) -> ROISettings:
+        return _parse_roi_shapes_section(section, p.parent)
+
+    if isinstance(data, dict):
+        if "rois" in data:
+            settings = _build(data["rois"])
+            return settings.table, settings.resolution
+        if "shapes" in data:
+            settings = _build(data)
+            return settings.table, settings.resolution
+    elif isinstance(data, list):
+        settings = _build({"shapes": data})
+        return settings.table, settings.resolution
+
+    raise ValueError("ROI YAML must contain either a 'rois' mapping or a 'shapes' list")
 
 
-def load_circles(path: PathLike) -> np.ndarray:
-    arr, _ = load_circles_with_meta(path)
-    return arr
+def load_runtime_config(path: PathLike) -> RuntimeConfig:
+    """Load a YAML configuration describing capture/stream/ROI settings."""
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"Config file not found: {p}")
+    data = yaml.safe_load(p.read_text()) or {}
+    if not isinstance(data, dict):
+        raise ValueError("Configuration file must contain a mapping at the top level")
+
+    extras: Dict[str, Any] = {}
+    known_keys = {"source", "backend", "format", "output", "stream", "rois"}
+    for k, v in data.items():
+        if k not in known_keys:
+            extras[k] = v
+
+    stream_section = data.get("stream")
+    stream_opts = StreamOptions()
+    if isinstance(stream_section, dict):
+        if "frames_per_chunk" in stream_section:
+            stream_opts.frames_per_chunk = int(stream_section["frames_per_chunk"])
+        if "print_fps_period" in stream_section:
+            stream_opts.print_fps_period = float(stream_section["print_fps_period"])
+        if "trace_buffer_sec" in stream_section:
+            stream_opts.trace_buffer_sec = float(stream_section["trace_buffer_sec"])
+        if "max_frames" in stream_section:
+            stream_opts.max_frames = int(stream_section["max_frames"])
+
+    rois_section = data.get("rois")
+    roi_settings = _parse_roi_shapes_section(rois_section, p.parent) if rois_section is not None else None
+
+    source = data.get("source")
+    backend = data.get("backend")
+    fmt = data.get("format")
+    out = data.get("output")
+
+    return RuntimeConfig(
+        source=source,
+        backend=backend,
+        format=fmt,
+        output=out,
+        stream=stream_opts,
+        rois=roi_settings,
+        extras=extras,
+    )
 
 
 def parse_source(src: str) -> Union[int, str]:

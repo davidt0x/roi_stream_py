@@ -1,0 +1,32 @@
+# Example ROI Stream YAML configuration
+# Source values can be overridden on the command line.
+
+source: "examples/test_circle_1280x720_60fps.mp4"
+backend: any
+format: 1280x720@60
+output: traces_output.h5
+
+stream:
+  frames_per_chunk: 240
+  print_fps_period: 1.0
+  trace_buffer_sec: 600.0
+  max_frames: 0
+
+rois:
+  resolution: [1280, 720]
+  shapes:
+    - name: center_circle
+      type: circle
+      center: [640.0, 360.0]
+      radius: 120.0
+    - name: elongated_target
+      type: ellipse
+      center: [320.0, 220.0]
+      radii: [140.0, 60.0]
+      angle_deg: -20.0
+    - name: upright_ellipse
+      center:
+        x: 960.0
+        y: 360.0
+      rx: 80.0
+      ry: 110.0

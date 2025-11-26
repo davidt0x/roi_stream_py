@@ -3,8 +3,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 from typing import Tuple
-import csv
 import numpy as np
+import yaml
 
 
 def generate_random_circles(width: int, height: int, count: int = 35,
@@ -29,32 +29,40 @@ def generate_random_circles(width: int, height: int, count: int = 35,
     return circles.astype(float, copy=False)
 
 
-def save_circles_csv(path: Path | str, circles: np.ndarray, resolution: Tuple[int, int] | None = None) -> None:
+def save_rois_yaml(path: Path | str, circles: np.ndarray, resolution: Tuple[int, int] | None = None) -> None:
+    """Write a YAML ROI file with circle entries (ellipse-compatible schema)."""
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    with p.open("w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["# xc,yc,r (pixels; origin at top-left)"])
-        if resolution is not None:
-            w.writerow([f"# resolution: {int(resolution[0])}x{int(resolution[1])}"])
-        for row in circles:
-            w.writerow([f"{row[0]:.3f}", f"{row[1]:.3f}", f"{row[2]:.3f}"])
+    shapes = []
+    for idx, row in enumerate(circles):
+        shapes.append(
+            {
+                "name": idx,
+                "center": [float(row[0]), float(row[1])],
+                "radius": float(row[2]),
+            }
+        )
+    data: dict = {"shapes": shapes}
+    if resolution is not None:
+        data["resolution"] = [int(resolution[0]), int(resolution[1])]
+    with p.open("w", encoding="utf-8") as f:
+        yaml.safe_dump(data, f, sort_keys=False)
 
 
 def main_random_rois(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="roi_stream_make_random_rois",
-                                 description="Generate a CSV of random ROI circles")
+                                 description="Generate a YAML file of random circular ROI definitions")
     ap.add_argument("--width", type=int, default=1280, help="Frame width in pixels")
     ap.add_argument("--height", type=int, default=720, help="Frame height in pixels")
     ap.add_argument("--count", type=int, default=35, help="Number of ROIs to generate")
     ap.add_argument("--seed", type=int, default=12345, help="Random seed")
     ap.add_argument("--min-frac", type=float, default=0.02, help="Min radius as fraction of min(height,width)")
     ap.add_argument("--max-frac", type=float, default=0.06, help="Max radius as fraction of min(height,width)")
-    ap.add_argument("--out", type=str, default=str(Path("examples/rois_random.csv")), help="Output CSV path")
+    ap.add_argument("--out", type=str, default=str(Path("examples/rois_random.yaml")), help="Output YAML path")
     args = ap.parse_args(argv)
 
     circles = generate_random_circles(args.width, args.height, args.count, args.min_frac, args.max_frac, args.seed)
-    save_circles_csv(args.out, circles, (args.width, args.height))
+    save_rois_yaml(args.out, circles, (args.width, args.height))
     print(f"Wrote {len(circles)} ROIs to {args.out}")
     return 0
 

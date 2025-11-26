@@ -203,11 +203,11 @@ def build_sample_shared_state() -> Tuple[SharedState, threading.Event]:
         )
         traces.append(float(t), trace_vector)
 
-    shared.circles = np.array(
+    shared.rois = np.array(
         [
-            (80.0, 70.0, 22.0),
-            (140.0, 110.0, 18.0),
-            (210.0, 65.0, 25.0),
+            (80.0, 70.0, 22.0, 22.0, 0.0),
+            (140.0, 110.0, 18.0, 18.0, 0.0),
+            (210.0, 65.0, 25.0, 25.0, 0.0),
         ],
         dtype=np.float32,
     )

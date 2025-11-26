@@ -119,8 +119,8 @@ class ViewerApp:
         colors: List[Tuple[int, int, int, int]] = []
         for i in range(count):
             h = (i / max(1, count)) % 1.0
-            s = 0.85
-            v = 0.95
+            s = 0.95
+            v = 1.0
             r, g, b = colorsys.hsv_to_rgb(h, s, v)
             colors.append((int(r * 255), int(g * 255), int(b * 255), 255))
         return colors
@@ -170,18 +170,20 @@ class ViewerApp:
                     gray16 = np.asarray(frame16, dtype=np.uint16)
                     image = np.right_shift(gray16, 8).astype(np.uint8)
 
-            circles = self.shared.circles
-            if image is not None and circles is not None and len(circles) > 0:
+            rois = self.shared.rois
+            if image is not None and rois is not None and len(rois) > 0:
                 with self._perf.measure("preview_overlay"):
                     if image.ndim == 2:
                         image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
                     palette = self._colors_bgr or [(0, 0, 255)]
-                    for idx, circle in enumerate(circles):
-                        cx = int(round(float(circle[0])))
-                        cy = int(round(float(circle[1])))
-                        radius = int(max(1.0, float(circle[2])))
+                    for idx, roi in enumerate(rois):
+                        cx = int(round(float(roi[0])))
+                        cy = int(round(float(roi[1])))
+                        rx = int(max(1.0, float(roi[2])))
+                        ry = int(max(1.0, float(roi[3])))
                         color = palette[idx % len(palette)]
-                        cv2.circle(image, (cx, cy), radius, color, thickness=1)
+                        angle = float(roi[4]) if roi.size > 4 else 0.0
+                        cv2.ellipse(image, (cx, cy), (rx, ry), angle, 0, 360, color, thickness=2)
 
             if self._preview_image is not image:
                 self._preview_image = image
@@ -199,8 +201,8 @@ class ViewerApp:
         tlast = traces.last_time()
         self._stats_text = f"ROIs={k}  samples={total}  t={tlast:0.2f}s"
 
-        circle_count = int(len(self.shared.circles)) if self.shared.circles is not None else 0
-        self._ensure_palette(max(k, circle_count))
+        roi_count = int(len(self.shared.rois)) if self.shared.rois is not None else 0
+        self._ensure_palette(max(k, roi_count))
         self._update_preview_image()
 
         with self._perf.measure("update_state_total"):
