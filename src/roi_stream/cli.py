@@ -1,25 +1,28 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 from typing import Optional, Tuple, Union
 import numpy as np
 import threading
 
 from .config import RuntimeConfig, StreamOptions, load_runtime_config, parse_format, parse_source
+from .hamamatsu_sdk import (
+    ENV_SDK_PYTHON_DIR,
+    HAMAMATSU_SDK_URL,
+    install_hamamatsu_sdk,
+    probe_hamamatsu_status,
+)
 from .stream import run_stream
 from .shared import SharedState, TraceRing
 
 
-def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
-        prog="roi_stream",
-        description="ROI streaming: capture frames, compute ROI means (circles or ellipses), write HDF5",
-    )
+def _configure_stream_parser(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
     p.add_argument("--config", required=True, help="Path to YAML config with capture/ROI definitions")
     p.add_argument("--source", help="Device index (e.g., 2) or video file path")
     p.add_argument("--format", default=None, help="Format string like '1280x720@60' (best effort)")
-    p.add_argument("--backend", default="any", choices=["any","v4l2","msmf","dshow","gstreamer","ffmpeg"], help="Capture backend hint for device indexes")
+    p.add_argument("--backend", default="any", choices=["any","v4l2","msmf","dshow","gstreamer","ffmpeg","hamamatsu_sdk"], help="Capture backend hint for device indexes")
     p.add_argument("--out", default=None, help="Output HDF5 path (default: traces_YYYYMMDD_HHMMSS.h5)")
     p.add_argument("--frames-per-chunk", type=int, default=240, help="Rows per HDF5 chunk append")
     p.add_argument("--trace-buffer-sec", type=float, default=600.0, help="GUI ring buffer seconds (reserved)")
@@ -29,9 +32,124 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def build_stream_parser() -> argparse.ArgumentParser:
+    return _configure_stream_parser(
+        argparse.ArgumentParser(
+            prog="roi_stream stream",
+            description="ROI streaming: capture frames, compute ROI means (circles or ellipses), write HDF5",
+        )
+    )
+
+
+def _configure_install_hamamatsu_parser(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    p.add_argument("--yes", action="store_true", help="Accept the vendor download prompt non-interactively")
+    p.add_argument("--url", default=HAMAMATSU_SDK_URL, help="Override the Hamamatsu SDK archive URL")
+    p.add_argument("--install-dir", default=None, help="Override the per-user Hamamatsu SDK install root")
+    return p
+
+
+def build_install_hamamatsu_parser() -> argparse.ArgumentParser:
+    return _configure_install_hamamatsu_parser(
+        argparse.ArgumentParser(
+            prog="roi_stream install-hamamatsu-sdk",
+            description="Download and install Hamamatsu DCAM SDK Python samples into a per-user directory",
+        )
+    )
+
+
+def _configure_doctor_parser(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    p.add_argument("target", choices=["hamamatsu"], help="Diagnostic target")
+    p.add_argument("--sdk-python-dir", default=None, help="Explicit Hamamatsu SDK Python samples directory to probe")
+    p.add_argument("--install-dir", default=None, help="Override the per-user Hamamatsu SDK install root")
+    return p
+
+
+def build_doctor_parser() -> argparse.ArgumentParser:
+    return _configure_doctor_parser(
+        argparse.ArgumentParser(prog="roi_stream doctor", description="Inspect optional backend setup")
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="roi_stream",
+        description="ROI streaming and optional Hamamatsu SDK management",
+    )
+    subparsers = parser.add_subparsers(dest="command")
+
+    stream_parser = _configure_stream_parser(
+        subparsers.add_parser(
+            "stream",
+            help="Capture frames, compute ROI means, and write HDF5",
+            description="ROI streaming: capture frames, compute ROI means (circles or ellipses), write HDF5",
+        )
+    )
+    stream_parser.set_defaults(command="stream")
+
+    install_parser = _configure_install_hamamatsu_parser(
+        subparsers.add_parser(
+            "install-hamamatsu-sdk",
+            help="Download the Hamamatsu SDK Python samples into a per-user directory",
+            description="Download and install Hamamatsu DCAM SDK Python samples into a per-user directory",
+        )
+    )
+    install_parser.set_defaults(command="install-hamamatsu-sdk")
+
+    doctor_parser = _configure_doctor_parser(
+        subparsers.add_parser(
+            "doctor",
+            help="Inspect optional backend setup",
+            description="Inspect optional backend setup",
+        )
+    )
+    doctor_parser.set_defaults(command="doctor")
+
+    return parser
+
+
+def _run_install_hamamatsu_args(args: argparse.Namespace) -> int:
+    install_dir = Path(args.install_dir).expanduser() if args.install_dir else None
+    status = install_hamamatsu_sdk(url=str(args.url), base_dir=install_dir, accept_license=bool(args.yes))
+    print(f"[roi_stream] Hamamatsu SDK files installed under: {status.install_root}")
+    if status.python_dir is not None:
+        print(f"[roi_stream] SDK Python directory: {status.python_dir}")
+        print(f"[roi_stream] Set {ENV_SDK_PYTHON_DIR} to override this path if needed.")
+    print(f"[roi_stream] Runtime status: {status.runtime_message}")
+    if status.camera_count is not None:
+        print(f"[roi_stream] Detected Hamamatsu cameras: {status.camera_count}")
+    return 0 if status.installed else 2
+
+
+def _run_doctor_args(args: argparse.Namespace) -> int:
+    install_dir = Path(args.install_dir).expanduser() if args.install_dir else None
+    status = probe_hamamatsu_status(explicit=args.sdk_python_dir, base_dir=install_dir)
+    print(f"[roi_stream] Hamamatsu install root: {status.install_root}")
+    print(f"[roi_stream] SDK installed: {'yes' if status.installed else 'no'}")
+    if status.metadata is not None:
+        print(f"[roi_stream] Recorded SDK version: {status.metadata.version}")
+        print(f"[roi_stream] Recorded SDK URL: {status.metadata.url}")
+    if status.python_dir is not None:
+        print(f"[roi_stream] SDK Python directory: {status.python_dir}")
+    print(f"[roi_stream] Runtime status: {status.runtime_message}")
+    if status.camera_count is not None:
+        print(f"[roi_stream] Detected Hamamatsu cameras: {status.camera_count}")
+    return 0 if status.installed else 2
+
+
 def main(argv: Optional[list[str]] = None) -> int:
+    argv = list(argv) if argv is not None else list(os.sys.argv[1:])
     parser = build_parser()
+    known_commands = {"stream", "install-hamamatsu-sdk", "doctor"}
+    if argv and argv[0] not in known_commands and argv[0] not in {"-h", "--help"}:
+        argv = ["stream", *argv]
     args = parser.parse_args(argv)
+    if args.command == "install-hamamatsu-sdk":
+        return _run_install_hamamatsu_args(args)
+    if args.command == "doctor":
+        return _run_doctor_args(args)
+    if args.command not in {None, "stream"}:
+        parser.error(f"Unsupported command: {args.command}")
+    stream_defaults = build_stream_parser()
 
     cfg: RuntimeConfig = load_runtime_config(args.config)
     if cfg.rois is None:
@@ -58,10 +176,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     fmt = parse_format(fmt_str)
 
     # Backend resolution: CLI overrides config unless left as default
-    backend_default = parser.get_default("backend")
+    backend_default = stream_defaults.get_default("backend")
     backend = args.backend
     if cfg.backend and backend == backend_default:
         backend = str(cfg.backend)
+    if cfg.hamamatsu_sdk_python_dir and not os.environ.get(ENV_SDK_PYTHON_DIR):
+        os.environ[ENV_SDK_PYTHON_DIR] = cfg.hamamatsu_sdk_python_dir
 
     # Output path
     out_path = args.out
@@ -70,10 +190,10 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # Stream options merging (config base, CLI override when not default)
     defaults = {
-        "frames_per_chunk": parser.get_default("frames_per_chunk"),
-        "print_fps_period": parser.get_default("print_fps_period"),
-        "trace_buffer_sec": parser.get_default("trace_buffer_sec"),
-        "max_frames": parser.get_default("max_frames"),
+        "frames_per_chunk": stream_defaults.get_default("frames_per_chunk"),
+        "print_fps_period": stream_defaults.get_default("print_fps_period"),
+        "trace_buffer_sec": stream_defaults.get_default("trace_buffer_sec"),
+        "max_frames": stream_defaults.get_default("max_frames"),
     }
     stream_base = cfg.stream
 
@@ -118,6 +238,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     shared=shared,
                     stop_event=stop_event,
                     roi_src_resolution=roi_src_res,
+                    hamamatsu_settings=cfg.hamamatsu,
                 )
                 result["out"] = out
             except Exception as e:
@@ -142,6 +263,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         fmt,
         backend=backend,
         roi_src_resolution=roi_src_res,
+        hamamatsu_settings=cfg.hamamatsu,
     )
     print(str(out))
     return 0

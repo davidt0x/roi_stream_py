@@ -14,9 +14,40 @@ Device probing
 
 - Probe indexes and report resolution/FPS:
   - `roi_stream_devices --backend any --max-index 5`
+- Probe Hamamatsu cameras after SDK setup:
+  - `roi_stream doctor hamamatsu`
 - Windows backend/device name tips:
   - Use `--backend dshow` or `--backend msmf`.
   - DirectShow device names can be opened with `--source "video=OBS Virtual Camera" --backend dshow`.
+
+Hamamatsu SDK setup
+
+- Install the vendor SDK samples into a per-user directory:
+  - `roi_stream install-hamamatsu-sdk`
+- This downloads the SDK archive from Hamamatsu after an explicit confirmation prompt.
+- The installer records the resolved SDK path under the user data directory and does not write into `site-packages`.
+- The archive currently contains the vendor Python sample files, but not necessarily the DCAM runtime library itself. Use:
+  - `roi_stream doctor hamamatsu`
+  to confirm whether both the SDK files and the runtime are available on the machine.
+- Hamamatsu defaults are intentionally generic. Rig-specific camera settings should be expressed explicitly under `capture:`. Example:
+  ```yaml
+  capture:
+    driver: hamamatsu_sdk
+    pixel_type: MONO16
+    readout_speed: FASTEST
+    frame_rate: 80
+    exposure_sec: 0.0125
+    binning: 2
+    roi: [0, 320, 1152, 476]
+    output_triggers:
+      - line: 2
+        source: EXPOSURE
+        polarity: POSITIVE
+      - line: 3
+        source: EXPOSURE
+        polarity: POSITIVE
+  ```
+- A concrete rig-specific example is included at `examples/polina_rig_config.yaml`.
 
 WSL notes
 

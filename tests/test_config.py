@@ -106,3 +106,37 @@ def test_parse_source_numeric_and_path(tmp_path: Path):
     assert parse_source("-1") == -1
     path = "video/example.mp4"
     assert parse_source(path) == path
+
+
+def test_load_runtime_config_with_hamamatsu_capture_settings(tmp_path: Path):
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(
+        """
+source: 0
+capture:
+  driver: hamamatsu_sdk
+  sdk_python_dir: /tmp/hamamatsu_sdk/python
+  frame_rate: 80
+  exposure_sec: 0.0125
+  binning: 2
+  roi: [0, 320, 1152, 476]
+  output_triggers:
+    - line: 2
+      source: EXPOSURE
+      polarity: POSITIVE
+rois:
+  shapes:
+    - center: [10, 20]
+      radius: 5
+        """,
+        encoding="utf-8",
+    )
+
+    cfg = load_runtime_config(cfg_path)
+    assert cfg.backend == "hamamatsu_sdk"
+    assert cfg.hamamatsu_sdk_python_dir == "/tmp/hamamatsu_sdk/python"
+    assert cfg.hamamatsu["frame_rate"] == 80
+    assert cfg.hamamatsu["exposure_sec"] == 0.0125
+    assert cfg.hamamatsu["binning"] == 2
+    assert cfg.hamamatsu["roi"] == [0, 320, 1152, 476]
+    assert cfg.hamamatsu["output_triggers"][0]["line"] == 2

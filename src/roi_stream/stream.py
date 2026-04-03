@@ -44,6 +44,7 @@ def run_stream(
     shared: Optional[SharedState] = None,
     stop_event: Optional[threading.Event] = None,
     roi_src_resolution: Optional[Tuple[int, int]] = None,
+    hamamatsu_settings: Optional[dict] = None,
 ) -> Path:
     """Run the streaming loop headlessly and write HDF5.
 
@@ -55,8 +56,11 @@ def run_stream(
     if format_tuple is not None:
         width, height, fps_req = format_tuple
 
-    src = FrameSource(source, width=width, height=height, fps=fps_req, backend=backend)
+    src = FrameSource(source, width=width, height=height, fps=fps_req, backend=backend, hamamatsu_settings=hamamatsu_settings)
     if not src.open():
+        detail = src.get_last_error().strip()
+        if detail:
+            raise RuntimeError(f"Failed to open source: {source}. {detail}")
         raise RuntimeError(f"Failed to open source: {source}")
 
     # Read one frame to determine resolution (and to warm up the capture)

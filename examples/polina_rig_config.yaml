@@ -1,0 +1,46 @@
+# Example configuration for Polina's Hamamatsu + TTL rig.
+# This captures the camera-side settings used in roi_stream_mat.
+#
+# Before using:
+# - Install the Hamamatsu SDK helper files:
+#   roi_stream install-hamamatsu-sdk
+# - Confirm runtime availability:
+#   roi_stream doctor hamamatsu
+# - Replace the ROI file with your translated/calibrated ROI definitions.
+
+source: 0
+output: traces_output.h5
+
+stream:
+  frames_per_chunk: 240
+  print_fps_period: 1.0
+  trace_buffer_sec: 600.0
+  max_frames: 0
+
+capture:
+  driver: hamamatsu_sdk
+  pixel_type: MONO16
+  readout_speed: FASTEST
+  frame_rate: 80
+  exposure_sec: 0.0125
+  binning: 2
+  roi: [0, 320, 1152, 476]
+  output_triggers:
+    - line: 2
+      source: EXPOSURE
+      polarity: POSITIVE
+    - line: 3
+      source: EXPOSURE
+      polarity: POSITIVE
+
+rois:
+  resolution: [1152, 476]
+  shapes:
+    - name: roi_0
+      type: circle
+      center: [200.0, 150.0]
+      radius: 25.0
+    - name: roi_1
+      type: circle
+      center: [420.0, 300.0]
+      radius: 30.0

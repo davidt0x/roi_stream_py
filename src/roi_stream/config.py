@@ -34,6 +34,8 @@ class ROISettings:
 class RuntimeConfig:
     source: Optional[Union[int, str]] = None
     backend: Optional[str] = None
+    hamamatsu_sdk_python_dir: Optional[str] = None
+    hamamatsu: Dict[str, Any] = field(default_factory=dict)
     format: Optional[str] = None
     output: Optional[str] = None
     stream: StreamOptions = field(default_factory=StreamOptions)
@@ -179,7 +181,7 @@ def load_runtime_config(path: PathLike) -> RuntimeConfig:
         raise ValueError("Configuration file must contain a mapping at the top level")
 
     extras: Dict[str, Any] = {}
-    known_keys = {"source", "backend", "format", "output", "stream", "rois"}
+    known_keys = {"source", "backend", "capture", "format", "output", "stream", "rois"}
     for k, v in data.items():
         if k not in known_keys:
             extras[k] = v
@@ -201,12 +203,30 @@ def load_runtime_config(path: PathLike) -> RuntimeConfig:
 
     source = data.get("source")
     backend = data.get("backend")
+    hamamatsu_sdk_python_dir = None
+    hamamatsu: Dict[str, Any] = {}
+    capture_section = data.get("capture")
+    if isinstance(capture_section, dict):
+        driver = capture_section.get("driver")
+        if backend is None and driver is not None:
+            backend = str(driver)
+        sdk_python_dir = capture_section.get("sdk_python_dir")
+        if sdk_python_dir is not None:
+            hamamatsu_sdk_python_dir = str(sdk_python_dir)
+        if "hamamatsu" in capture_section and isinstance(capture_section.get("hamamatsu"), dict):
+            hamamatsu = dict(capture_section["hamamatsu"])
+        else:
+            for key in ("profile", "frame_rate", "exposure_sec", "binning", "roi", "pixel_type", "readout_speed", "output_triggers", "properties"):
+                if key in capture_section:
+                    hamamatsu[key] = capture_section[key]
     fmt = data.get("format")
     out = data.get("output")
 
     return RuntimeConfig(
         source=source,
         backend=backend,
+        hamamatsu_sdk_python_dir=hamamatsu_sdk_python_dir,
+        hamamatsu=hamamatsu,
         format=fmt,
         output=out,
         stream=stream_opts,

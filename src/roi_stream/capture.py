@@ -6,6 +6,13 @@ import sys
 import platform
 import cv2
 
+from .hamamatsu_sdk import (
+    apply_hamamatsu_settings,
+    discover_sdk_python_dir,
+    get_missing_sdk_message,
+    import_hamamatsu_modules,
+)
+
 
 @dataclass
 class FrameSource:
@@ -13,12 +20,21 @@ class FrameSource:
     width: Optional[int] = None
     height: Optional[int] = None
     fps: Optional[float] = None
-    backend: Optional[str] = None  # 'any'|'v4l2'|'msmf'|'dshow'|'gstreamer'|'ffmpeg'
+    backend: Optional[str] = None  # 'any'|'v4l2'|'msmf'|'dshow'|'gstreamer'|'ffmpeg'|'hamamatsu_sdk'
+    hamamatsu_settings: Optional[dict] = None
 
     def __post_init__(self) -> None:
         self._cap: Optional[cv2.VideoCapture] = None
+        self._hamamatsu_cam = None
+        self._hamamatsu_api = None
+        self._last_frame_shape: Optional[tuple[int, int]] = None
+        self._last_error: str = ""
 
     def open(self) -> bool:
+        self._last_error = ""
+        if (self.backend or "any").lower() == "hamamatsu_sdk":
+            return self._open_hamamatsu_sdk()
+
         # Determine backend candidates
         backends: List[Optional[int]] = []
         b = (self.backend or 'any').lower()
@@ -77,8 +93,11 @@ class FrameSource:
         if cap is None or not cap.isOpened():
             self._cap = None
             if _is_wsl() and isinstance(self.source, int):
-                print("[roi_stream] Detected WSL. Access to host cameras via /dev/video* is typically unavailable. "
-                      "Run on Windows Python or use a file/RTSP source.")
+                self._last_error = ("Detected WSL. Access to host cameras via /dev/video* is typically unavailable. "
+                                    "Run on Windows Python or use a file/RTSP source.")
+                print(f"[roi_stream] {self._last_error}")
+            else:
+                self._last_error = "OpenCV could not open the requested source."
             return False
 
         # Apply requested properties if provided
@@ -96,11 +115,30 @@ class FrameSource:
         return True
 
     def read(self):
+        if self._hamamatsu_cam is not None:
+            try:
+                if not self._hamamatsu_cam.wait_capevent_frameready(1000):
+                    self._last_error = f"Hamamatsu frame wait failed: {self._hamamatsu_cam.lasterr()}"
+                    return False, None
+                frame = self._hamamatsu_cam.buf_getlastframedata()
+                if frame is None:
+                    self._last_error = "Hamamatsu SDK returned no frame data."
+                    return False, None
+                try:
+                    self._last_frame_shape = tuple(int(x) for x in frame.shape[:2])
+                except Exception:
+                    self._last_frame_shape = None
+                return True, frame
+            except Exception as exc:
+                self._last_error = f"Hamamatsu frame acquisition failed: {exc}"
+                return False, None
         if self._cap is None:
             raise RuntimeError("FrameSource not opened")
         return self._cap.read()
 
     def get_resolution(self):
+        if self._last_frame_shape is not None:
+            return int(self._last_frame_shape[1]), int(self._last_frame_shape[0])
         if self._cap is None:
             return None, None
         w = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -108,17 +146,103 @@ class FrameSource:
         return w, h
 
     def get_fps(self) -> float:
+        if self._hamamatsu_cam is not None:
+            return float(self.fps) if self.fps is not None else 0.0
         if self._cap is None:
             return 0.0
         fps = float(self._cap.get(cv2.CAP_PROP_FPS))
         return fps if fps > 0 else 0.0
 
     def release(self) -> None:
+        if self._hamamatsu_cam is not None:
+            try:
+                try:
+                    self._hamamatsu_cam.cap_stop()
+                except Exception:
+                    pass
+                try:
+                    self._hamamatsu_cam.buf_release()
+                except Exception:
+                    pass
+                try:
+                    self._hamamatsu_cam.dev_close()
+                except Exception:
+                    pass
+            finally:
+                self._hamamatsu_cam = None
+                if self._hamamatsu_api is not None:
+                    try:
+                        self._hamamatsu_api.Dcamapi.uninit()
+                    finally:
+                        self._hamamatsu_api = None
         if self._cap is not None:
             try:
                 self._cap.release()
             finally:
                 self._cap = None
+
+    def get_last_error(self) -> str:
+        return self._last_error
+
+    def _open_hamamatsu_sdk(self) -> bool:
+        if not isinstance(self.source, int):
+            self._last_error = "Hamamatsu SDK backend requires an integer camera index."
+            return False
+
+        python_dir = discover_sdk_python_dir()
+        if python_dir is None:
+            self._last_error = get_missing_sdk_message()
+            return False
+
+        try:
+            dcamapi4, dcam = import_hamamatsu_modules(python_dir)
+        except Exception as exc:
+            self._last_error = f"Failed to import Hamamatsu SDK from {python_dir}: {exc}"
+            return False
+
+        try:
+            if not dcam.Dcamapi.init():
+                self._last_error = f"DCAM initialization failed: {dcam.Dcamapi.lasterr()}"
+                return False
+
+            cam = dcam.Dcam(int(self.source))
+            if not cam.dev_open():
+                self._last_error = f"DCAM camera open failed: {cam.lasterr()}"
+                dcam.Dcamapi.uninit()
+                return False
+
+            if not cam.buf_alloc(3):
+                self._last_error = f"DCAM buffer allocation failed: {cam.lasterr()}"
+                cam.dev_close()
+                dcam.Dcamapi.uninit()
+                return False
+
+            try:
+                apply_hamamatsu_settings(cam, dcamapi4, self.hamamatsu_settings, fps_hint=self.fps)
+            except Exception as exc:
+                self._last_error = f"DCAM camera setup failed: {exc}"
+                cam.buf_release()
+                cam.dev_close()
+                dcam.Dcamapi.uninit()
+                return False
+
+            if not cam.cap_start():
+                self._last_error = f"DCAM capture start failed: {cam.lasterr()}"
+                cam.buf_release()
+                cam.dev_close()
+                dcam.Dcamapi.uninit()
+                return False
+
+            self._hamamatsu_cam = cam
+            self._hamamatsu_api = dcam
+            return True
+        except Exception as exc:
+            try:
+                dcam.Dcamapi.uninit()
+            except Exception:
+                pass
+            self._last_error = f"Hamamatsu SDK backend setup failed: {exc}"
+            return False
 
 
 def _is_wsl() -> bool:

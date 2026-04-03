@@ -7,7 +7,7 @@ from .capture import FrameSource
 
 def main(argv: List[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="roi_stream_devices", description="Probe camera device indexes for the selected backend")
-    p.add_argument("--backend", default="any", choices=["any","v4l2","msmf","dshow","gstreamer","ffmpeg"], help="Capture backend hint")
+    p.add_argument("--backend", default="any", choices=["any","v4l2","msmf","dshow","gstreamer","ffmpeg","hamamatsu_sdk"], help="Capture backend hint")
     p.add_argument("--max-index", type=int, default=10, help="Probe indexes in [0..N]")
     p.add_argument("--format", default=None, help="Optional format 'WxH@FPS' to request when opening")
     args = p.parse_args(argv)
@@ -36,4 +36,3 @@ def main(argv: List[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
